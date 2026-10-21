@@ -49,7 +49,7 @@ final class JellyfinChannels {
             Map<String, Item> features = new LinkedHashMap<>(), views = new LinkedHashMap<>();
             for (Row row : rows) for (Item item : row.items) {
                 Map<String, Item> target = item.library ? views : features;
-                if (target.size() < MAX_ITEMS) target.putIfAbsent(item.key, item);
+                if (item.library || target.size() < MAX_ITEMS) target.putIfAbsent(item.key, item);
             }
             featured = new ArrayList<>(features.values());
             libraries = new ArrayList<>(views.values());
@@ -73,15 +73,13 @@ final class JellyfinChannels {
             Uri uri = owned(TvContract.Channels.CONTENT_URI);
             try (Cursor c = context.getContentResolver().query(uri,
                     new String[]{"_id", "package_name", "display_name", "type"}, null, null, null)) {
-                int scanned = 0;
-                while (c != null && c.moveToNext() && scanned++ < 100) {
+                while (c != null && c.moveToNext()) {
                     if (PACKAGE.equals(c.getString(1)) && "TYPE_PREVIEW".equals(c.getString(3))) {
                         channels.put(c.getLong(0), new Row(c.getString(2)));
                     }
                 }
             }
             for (Map.Entry<Long, Row> entry : channels.entrySet()) {
-                if (rows.size() >= 7) break;
                 Uri programs = TvContract.PreviewPrograms.CONTENT_URI.buildUpon()
                         .appendQueryParameter("channel", String.valueOf(entry.getKey())).build();
                 readPrograms(context, programs, entry.getValue());
@@ -102,15 +100,17 @@ final class JellyfinChannels {
         try (Cursor c = context.getContentResolver().query(owned(uri),
                 new String[]{"package_name", "title", "short_description", "poster_art_uri",
                         "thumbnail_uri", "intent_uri"}, null, null, null)) {
-            int scanned = 0;
-            while (c != null && c.moveToNext() && scanned++ < 300 && row.items.size() < MAX_ITEMS) {
+            int featuredCount = 0;
+            while (c != null && c.moveToNext()) {
                 if (!PACKAGE.equals(c.getString(0)) || c.isNull(1) || c.isNull(5)) continue;
                 try {
                     Intent intent = Intent.parseUri(c.getString(5), Intent.URI_INTENT_SCHEME);
                     String key = intent.getStringExtra("ItemId");
+                    boolean library = intent.getBooleanExtra("ItemIsUserView", false);
+                    if (!library && featuredCount++ >= MAX_ITEMS) continue;
                     row.items.add(new Item(key == null ? c.getString(5) : key,
                             c.getString(1), c.getString(2), c.getString(3), c.getString(4), c.getString(5),
-                            intent.getBooleanExtra("ItemIsUserView", false)));
+                            library));
                 } catch (Exception ignored) {
                     // A damaged published intent must not prevent the other libraries from appearing.
                 }

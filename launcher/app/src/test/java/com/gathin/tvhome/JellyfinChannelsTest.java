@@ -41,4 +41,12 @@ public class JellyfinChannelsTest {
         assertEquals(20, content.featured.size());
         assertEquals(1, content.libraries.size());
     }
+
+    @Test public void librariesAreNotTruncatedAtTheFeaturedLimit() {
+        JellyfinChannels.Row row = new JellyfinChannels.Row("Libraries");
+        for (int i = 0; i < 25; i++) row.items.add(item("library-" + i, true));
+        JellyfinChannels.Result content = new JellyfinChannels.Result(Collections.singletonList(row), false);
+        assertEquals(25, content.libraries.size());
+        assertEquals("library-24", content.libraries.get(24).key);
+    }
 }

@@ -34,6 +34,10 @@ Cache images in memory only: 26 MiB for backdrops and 6 MiB for thumbnails. Coal
 requests and prioritize the focused backdrop over queued work. Prefetch only immediate previous/next
 featured backdrops. Retain the cache when opening another app, release it on memory pressure or
 activity destruction. No separate library-backdrop requests for now, per the owner's decision.
+Reserve queue capacity for visible work, discard obsolete focus/tile requests and evict speculative
+prefetches before rejecting useful work. Deferred visible requests retry when worker capacity returns;
+queue pressure is not treated as missing artwork. Reload configuration and saved app order when
+rebuilding Home, including after returning from the original launcher's settings.
 
 ## Alternatives and consequences
 

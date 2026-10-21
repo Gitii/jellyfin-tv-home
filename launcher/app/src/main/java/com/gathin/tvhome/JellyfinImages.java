@@ -23,6 +23,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 /** Two bounded image workers, coalesced requests, and separate thumbnail/backdrop budgets. No disk cache. */
 final class JellyfinImages implements AutoCloseable {
@@ -30,7 +31,7 @@ final class JellyfinImages implements AutoCloseable {
 
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final LinkedBlockingDeque<Runnable> queue = new LinkedBlockingDeque<>(24);
+    private final LinkedBlockingDeque<Runnable> queue = new LinkedBlockingDeque<>(JellyfinImageQueue.CAPACITY);
     private final ThreadPoolExecutor workers = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS, queue);
     private final ScheduledExecutorService timeouts = Executors.newSingleThreadScheduledExecutor();
     private final Set<InputStream> streams = Collections.synchronizedSet(new HashSet<>());
@@ -51,9 +52,9 @@ final class JellyfinImages implements AutoCloseable {
         };
     }
 
-    void prefetch(String source, int width) { request(source, width, null); }
+    void prefetch(String source, int width) { request(source, width, null, () -> true); }
 
-    void load(String source, int width, Callback callback) { request(source, width, callback); }
+    void load(String source, int width, BooleanSupplier needed, Callback callback) { request(source, width, callback, needed); }
 
     Bitmap peek(String source, int width) {
         return source == null ? null : store(width).get(width + ":" + source);
@@ -61,8 +62,9 @@ final class JellyfinImages implements AutoCloseable {
 
     private LruCache<String, Bitmap> store(int width) { return width > 800 ? backdrops : thumbnails; }
 
-    private void request(String source, int width, Callback callback) {
-        if (closed) return;
+    private void request(String source, int width, Callback callback, BooleanSupplier needed) {
+        if (closed || !needed.getAsBoolean()) return;
+        prune();
         if (!JellyfinArtwork.isProviderImage(source)) {
             if (callback != null) callback.ready(null);
             return;
@@ -71,28 +73,61 @@ final class JellyfinImages implements AutoCloseable {
         if (cached != null) { if (callback != null) callback.ready(cached); return; }
         String key = width + ":" + source;
         Job job = pending.get(key);
-        boolean priority = callback != null && width > 800;
         if (job != null) {
-            if (callback != null) job.callbacks.add(callback);
-            if (priority && queue.remove(job)) queue.offerFirst(job);
+            if (callback != null) job.callbacks.add(new Subscriber(needed, callback));
+            if (callback != null && width > 800 && queue.remove(job)) job.queued = false;
+            drain();
             return;
         }
         job = new Job(key, source, width);
-        if (callback != null) job.callbacks.add(callback);
+        if (callback != null) job.callbacks.add(new Subscriber(needed, callback));
+        job.speculative = callback == null;
         pending.put(key, job);
-        if (!(priority ? queue.offerFirst(job) : queue.offerLast(job))) {
-            pending.remove(key);
-            if (callback != null) callback.ready(null);
+        drain(); // Visible requests remain deferred on backpressure, not completed as missing artwork.
+    }
+
+    private static final class Subscriber {
+        final BooleanSupplier needed;
+        final Callback callback;
+        Subscriber(BooleanSupplier needed, Callback callback) { this.needed = needed; this.callback = callback; }
+    }
+
+    private void prune() {
+        for (Job job : new ArrayList<>(pending.values())) {
+            job.callbacks.removeIf(subscriber -> !subscriber.needed.getAsBoolean());
+            if (job.callbacks.isEmpty() && !job.speculative && !job.running
+                    && (!job.queued || queue.remove(job))) pending.remove(job.key);
+        }
+    }
+
+    private void drain() {
+        prune();
+        List<Job> jobs = new ArrayList<>(pending.values());
+        jobs.sort((a, b) -> Integer.compare(b.priority(), a.priority()));
+        for (Job job : jobs) {
+            if (job.queued || job.running || !pending.containsKey(job.key)) continue;
+            boolean admitted = JellyfinImageQueue.offer(queue, job, job.priority(),
+                    task -> ((Job) task).callbacks.isEmpty(), task -> pending.remove(((Job) task).key));
+            job.queued = admitted;
+            if (!admitted && job.callbacks.isEmpty()) pending.remove(job.key);
         }
     }
 
     private final class Job implements Runnable {
         final String key, source;
         final int width;
-        final List<Callback> callbacks = new ArrayList<>();
+        final List<Subscriber> callbacks = new ArrayList<>();
+        volatile boolean running;
+        boolean queued, speculative;
         Job(String key, String source, int width) { this.key = key; this.source = source; this.width = width; }
 
+        int priority() {
+            return callbacks.isEmpty() ? JellyfinImageQueue.PREFETCH
+                    : width > 800 ? JellyfinImageQueue.FOCUSED : JellyfinImageQueue.VISIBLE;
+        }
+
         @Override public void run() {
+            running = true;
             long started = android.os.SystemClock.elapsedRealtime();
             android.util.Log.d("JellyfinImages", "Loading image at " + width + "px");
             Bitmap result = null;
@@ -107,7 +142,10 @@ final class JellyfinImages implements AutoCloseable {
             if (!closed) main.post(() -> {
                 if (closed) return;
                 pending.remove(key);
-                for (Callback callback : callbacks) callback.ready(bitmap);
+                for (Subscriber subscriber : callbacks) {
+                    if (subscriber.needed.getAsBoolean()) subscriber.callback.ready(bitmap);
+                }
+                drain();
             });
         }
     }

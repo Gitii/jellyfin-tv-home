@@ -26,6 +26,10 @@ The original MIT licence and upstream history are retained.
   focused artwork takes priority over queued work. Two workers use a 26 MiB backdrop cache plus a
   6 MiB thumbnail cache. Cache entries survive opening another app, but are released under memory
   pressure or activity destruction. Image-pipe reads are bounded to eight seconds.
+- Queue slots are reserved for visible images and focused backgrounds; speculative prefetches can
+  be evicted. Obsolete focus/tile work is discarded, while current visible requests wait for capacity
+  instead of being reported as missing images. App ordering and theme configuration are re-read on
+  refresh/return from the original launcher.
 - No Jellyfin server address, login, or API key is configured in this launcher. It has no Internet
   permission; Jellyfin handles image fetching using its existing session. Nothing is sent to an
   analytics service. Image URLs and media titles are not written to logs or disk caches.

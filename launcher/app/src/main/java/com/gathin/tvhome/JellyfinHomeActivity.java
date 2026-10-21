@@ -289,6 +289,9 @@ public final class JellyfinHomeActivity extends Activity {
             for (JellyfinChannels.Item item : content.libraries) section.tiles.add(new Tile(item));
             sections.add(section);
         }
+        config = Config.load(this);
+        appSource = new AppAdapter(this, null, 4, config);
+        appSource.setSavedOrder(Order.ranks(Order.load(Order.file(this)), config.dockApps));
         appSource.reload(Collections.emptyList());
         Section appRow = null;
         for (AppAdapter.Entry app : appSource.entries()) {
@@ -405,13 +408,13 @@ public final class JellyfinHomeActivity extends Activity {
             background.setImageBitmap(cached); background.setAlpha(.27f);
             android.util.Log.d("JellyfinHome", "Backdrop cache hit");
         }
-        images.load(source, artworkWidth, bitmap -> {
+        images.load(source, artworkWidth, () -> active && request == artGeneration, bitmap -> {
             if (!active || request != artGeneration) return;
             if (usable(bitmap) && bitmap.getWidth() > bitmap.getHeight() * 1.3f) {
                 background.setImageBitmap(bitmap); background.setAlpha(.27f);
                 android.util.Log.d("JellyfinHome", "Backdrop ready: " + bitmap.getWidth() + "x" + bitmap.getHeight());
             } else {
-                images.load(JellyfinArtwork.thumbnail(item.poster), artworkWidth, fallback -> {
+                images.load(JellyfinArtwork.thumbnail(item.poster), artworkWidth, () -> active && request == artGeneration, fallback -> {
                     if (!active || request != artGeneration) return;
                     if (usable(fallback) && fallback.getWidth() > fallback.getHeight() * 1.3f) {
                         background.setImageBitmap(fallback); background.setAlpha(.27f);
@@ -492,6 +495,7 @@ public final class JellyfinHomeActivity extends Activity {
             holder.name.setAlpha(0f);
             holder.card.setContentDescription(tile.label);
             holder.card.setTag(tile.key);
+            holder.card.setTag(R.id.name, Boolean.TRUE);
             holder.card.setOnClickListener(v -> { if (tile.app != null) appSource.launch(tile.app); else openItem(tile.item); });
             holder.card.setScaleX(1f); holder.card.setScaleY(1f);
             holder.banner.setImageDrawable(null);
@@ -508,6 +512,26 @@ public final class JellyfinHomeActivity extends Activity {
             } else loadTile(holder, tile, sections.get(row).kind == FEATURED);
         }
 
+        @Override public void onViewDetachedFromWindow(AppAdapter.Holder holder) {
+            holder.card.setTag(R.id.name, Boolean.FALSE);
+        }
+
+        @Override public void onViewAttachedToWindow(AppAdapter.Holder holder) {
+            boolean detached = Boolean.FALSE.equals(holder.card.getTag(R.id.name));
+            holder.card.setTag(R.id.name, Boolean.TRUE);
+            int position = holder.getBindingAdapterPosition();
+            if (detached && position != RecyclerView.NO_POSITION && row < sections.size()
+                    && holder.banner.getDrawable() == null) {
+                Tile tile = sections.get(row).tiles.get(position);
+                if (tile.item != null) loadTile(holder, tile, sections.get(row).kind == FEATURED);
+            }
+        }
+
+        @Override public void onViewRecycled(AppAdapter.Holder holder) {
+            holder.card.setTag(null);
+            holder.card.setTag(R.id.name, Boolean.FALSE);
+        }
+
         private void loadTile(AppAdapter.Holder holder, Tile tile, boolean featured) {
             List<String> candidates = new ArrayList<>();
             if (featured) candidates.add(JellyfinArtwork.thumbnail(tile.item.poster));
@@ -517,7 +541,9 @@ public final class JellyfinHomeActivity extends Activity {
 
         private void loadTileImage(AppAdapter.Holder holder, Tile tile, List<String> candidates, int index) {
             if (index >= candidates.size()) { holder.label.setText(tile.label); holder.label.setVisibility(View.VISIBLE); return; }
-            images.load(candidates.get(index), dp(200), bitmap -> {
+            images.load(candidates.get(index), dp(200),
+                    () -> active && tile.key.equals(holder.card.getTag())
+                            && Boolean.TRUE.equals(holder.card.getTag(R.id.name)), bitmap -> {
                 if (!active || !tile.key.equals(holder.card.getTag())) return;
                 if (!usable(bitmap)) { loadTileImage(holder, tile, candidates, index + 1); return; }
                 holder.banner.setImageBitmap(bitmap);
