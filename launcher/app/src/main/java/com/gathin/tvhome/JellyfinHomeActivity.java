@@ -136,6 +136,9 @@ public final class JellyfinHomeActivity extends Activity {
         wrapper.addView(rows, new FrameLayout.LayoutParams(-1, -1));
         rows.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override public void onScrolled(RecyclerView view, int dx, int dy) { fulfillFocus(); fitGlass(); }
+            @Override public void onScrollStateChanged(RecyclerView view, int state) {
+                if (state == RecyclerView.SCROLL_STATE_IDLE) fulfillFocus();
+            }
         });
         root.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener);
         wrapper.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -342,14 +345,17 @@ public final class JellyfinHomeActivity extends Activity {
             } else ((LinearLayoutManager) section.tiles.getLayoutManager()).scrollToPositionWithOffset(Math.max(0, pendingColumn - 3), 0);
             return;
         }
-        if (section.tiles.getScrollState() == RecyclerView.SCROLL_STATE_IDLE) {
-            int dx = holder.itemView.getLeft() < 0 ? holder.itemView.getLeft()
-                    : Math.max(0, holder.itemView.getRight() - section.tiles.getWidth());
-            if (dx != 0) {
+        int dx = holder.itemView.getLeft() < 0 ? holder.itemView.getLeft()
+                : Math.max(0, holder.itemView.getRight() - section.tiles.getWidth());
+        if (dx != 0) {
+            if (section.tiles.getScrollState() == RecyclerView.SCROLL_STATE_IDLE) {
                 if (config.animations && !config.reducedMotion) section.tiles.smoothScrollBy(dx, 0);
                 else section.tiles.scrollBy(dx, 0);
             }
+            return; // Keep the latest request until its tile is fully visible.
         }
+        // An older smooth scroll can still carry a visible reversed target offscreen.
+        if (section.tiles.getScrollState() != RecyclerView.SCROLL_STATE_IDLE) return;
         View card = holder.itemView.findViewById(R.id.card);
         pendingRow = -1;
         card.requestFocus();
@@ -438,6 +444,9 @@ public final class JellyfinHomeActivity extends Activity {
             tiles.setItemAnimator(null);
             tiles.addOnScrollListener(new RecyclerView.OnScrollListener() {
                 @Override public void onScrolled(RecyclerView view, int dx, int dy) { fulfillFocus(); fitGlass(); }
+                @Override public void onScrollStateChanged(RecyclerView view, int state) {
+                    if (state == RecyclerView.SCROLL_STATE_IDLE) fulfillFocus();
+                }
             });
             section.addView(tiles, new LinearLayout.LayoutParams(-1, dp(128)));
             return new SectionHolder(section, label, tiles);
@@ -545,6 +554,7 @@ public final class JellyfinHomeActivity extends Activity {
         @Override public int getItemCount() { return row < sections.size() ? sections.get(row).tiles.size() : 0; }
         @Override public void onTileFocused(int position, View card) { focused(row, position, card); }
         @Override public boolean onTileVerticalKey(int position, int key) {
+            if (pendingRow == row) position = pendingColumn;
             SectionHolder holder = (SectionHolder) rows.findViewHolderForAdapterPosition(row);
             int first = holder == null ? 0 : Math.max(0,
                     ((LinearLayoutManager) holder.tiles.getLayoutManager()).findFirstVisibleItemPosition());

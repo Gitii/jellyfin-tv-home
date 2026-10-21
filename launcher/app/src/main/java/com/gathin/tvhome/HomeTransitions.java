@@ -76,7 +76,17 @@ final class HomeTransitions {
     void focus(View card, boolean featured, String label, int colour) {
         this.card = card;
         moveGlass(true);
-        if (featured) showTitle(label);
+        if (featured) {
+            // A cached previous selection may still have a delayed fade-out swap queued.
+            artworkToken++;
+            requestedArtwork = null;
+            background.animate().cancel();
+            if (artwork != null) {
+                if (animations) background.animate().alpha(.27f).setDuration(reduced ? 160 : 420).start();
+                else background.setAlpha(.27f);
+            }
+            showTitle(label);
+        }
         else {
             titleToken++;
             hero.animate().cancel(); hero.setAlpha(0f); hero.setTranslationX(0f);
