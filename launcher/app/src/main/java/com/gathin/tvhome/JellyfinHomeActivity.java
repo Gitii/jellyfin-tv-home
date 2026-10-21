@@ -9,7 +9,6 @@ import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
-import android.graphics.drawable.GradientDrawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
@@ -59,6 +58,7 @@ public final class JellyfinHomeActivity extends Activity {
     private View hero, ambient;
     private TextView title, status;
     private GlassView glass;
+    private HomeTransitions transitions;
     private PopupWindow popup;
     private float density;
     private int artworkWidth;
@@ -67,7 +67,6 @@ public final class JellyfinHomeActivity extends Activity {
     private int pendingRow = -1, pendingColumn;
     private String focusedKey;
     private View focusedCard;
-    private final Rect tileRect = new Rect();
     private final ViewTreeObserver.OnGlobalLayoutListener layoutListener = () -> {
         fulfillFocus();
         fitGlass();
@@ -115,10 +114,9 @@ public final class JellyfinHomeActivity extends Activity {
         title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         findViewById(R.id.heroMeta).setVisibility(View.GONE);
         findViewById(R.id.heroDots).setVisibility(View.GONE);
-        View scrim = findViewById(R.id.heroScrim);
-        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x33000000, 0x00000000, 0x77000000}));
-        scrim.setVisibility(View.VISIBLE);
+        // The artwork is already dimmed. A second full-screen gradient adds visible dark colour steps.
+        findViewById(R.id.heroScrim).setVisibility(View.GONE);
+        transitions = new HomeTransitions(root, glass, hero, title, ambient, background, config);
 
         RecyclerView originalGrid = findViewById(R.id.grid);
         FrameLayout wrapper = (FrameLayout) originalGrid.getParent();
@@ -137,7 +135,7 @@ public final class JellyfinHomeActivity extends Activity {
         rows.setAdapter(new Sections());
         wrapper.addView(rows, new FrameLayout.LayoutParams(-1, -1));
         rows.addOnScrollListener(new RecyclerView.OnScrollListener() {
-            @Override public void onScrolled(RecyclerView view, int dx, int dy) { fitGlass(); }
+            @Override public void onScrolled(RecyclerView view, int dx, int dy) { fulfillFocus(); fitGlass(); }
         });
         root.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener);
         wrapper.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -167,7 +165,7 @@ public final class JellyfinHomeActivity extends Activity {
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldView, newView) -> {
             if (newView == null || newView.getId() != R.id.card) {
                 focusedCard = null;
-                glass.setAlpha(0f);
+                transitions.hideGlass();
             }
         });
     }
@@ -218,7 +216,7 @@ public final class JellyfinHomeActivity extends Activity {
         pendingRow = -1;
         focusedCard = null;
         if (popup != null) popup.dismiss();
-        glass.setAlpha(0f);
+        transitions.stop();
         super.onStop();
         // Keep the bounded image cache while another app is in front; returning Home need not fetch again.
     }
@@ -290,6 +288,7 @@ public final class JellyfinHomeActivity extends Activity {
             sections.add(section);
         }
         config = Config.load(this);
+        transitions.configure(config);
         appSource = new AppAdapter(this, null, 4, config);
         appSource.setSavedOrder(Order.ranks(Order.load(Order.file(this)), config.dockApps));
         appSource.reload(Collections.emptyList());
@@ -303,7 +302,7 @@ public final class JellyfinHomeActivity extends Activity {
             appRow.tiles.add(new Tile(app));
         }
         focusedCard = null;
-        glass.setAlpha(0f);
+        transitions.hideGlass();
         rows.getAdapter().notifyDataSetChanged();
         int row = 0, column = 0;
         if (!resetFocus && focusedKey != null) {
@@ -319,7 +318,16 @@ public final class JellyfinHomeActivity extends Activity {
         if (sections.isEmpty()) return;
         pendingRow = Math.max(0, Math.min(row, sections.size() - 1));
         pendingColumn = Math.max(0, Math.min(column, sections.get(pendingRow).tiles.size() - 1));
-        rowLayout.scrollToPositionWithOffset(Math.max(0, pendingRow - 1), 0);
+        int anchorPosition = Math.max(0, pendingRow - 1);
+        View anchor = rowLayout.findViewByPosition(anchorPosition);
+        if (anchor == null) rowLayout.scrollToPositionWithOffset(anchorPosition, 0);
+        else {
+            int dy = anchor.getTop() - rows.getPaddingTop();
+            if (Math.abs(dy) > dp(1)) {
+                if (config.animations && !config.reducedMotion) rows.smoothScrollBy(0, dy);
+                else rows.scrollBy(0, dy);
+            }
+        }
         rows.requestLayout();
     }
 
@@ -328,9 +336,19 @@ public final class JellyfinHomeActivity extends Activity {
         SectionHolder section = (SectionHolder) rows.findViewHolderForAdapterPosition(pendingRow);
         if (section == null) return;
         RecyclerView.ViewHolder holder = section.tiles.findViewHolderForAdapterPosition(pendingColumn);
-        if (holder == null || holder.itemView.getLeft() < 0 || holder.itemView.getRight() > section.tiles.getWidth()) {
-            ((LinearLayoutManager) section.tiles.getLayoutManager()).scrollToPositionWithOffset(Math.max(0, pendingColumn - 3), 0);
+        if (holder == null) {
+            if (config.animations && !config.reducedMotion) {
+                if (section.tiles.getScrollState() == RecyclerView.SCROLL_STATE_IDLE) section.tiles.smoothScrollToPosition(pendingColumn);
+            } else ((LinearLayoutManager) section.tiles.getLayoutManager()).scrollToPositionWithOffset(Math.max(0, pendingColumn - 3), 0);
             return;
+        }
+        if (section.tiles.getScrollState() == RecyclerView.SCROLL_STATE_IDLE) {
+            int dx = holder.itemView.getLeft() < 0 ? holder.itemView.getLeft()
+                    : Math.max(0, holder.itemView.getRight() - section.tiles.getWidth());
+            if (dx != 0) {
+                if (config.animations && !config.reducedMotion) section.tiles.smoothScrollBy(dx, 0);
+                else section.tiles.scrollBy(dx, 0);
+            }
         }
         View card = holder.itemView.findViewById(R.id.card);
         pendingRow = -1;
@@ -345,19 +363,14 @@ public final class JellyfinHomeActivity extends Activity {
         Section section = sections.get(row);
         Tile tile = section.tiles.get(column);
         focusedKey = tile.key;
-        hero.setAlpha(section.kind == FEATURED ? 1f : 0f);
-        title.setText(tile.label);
-        fitGlass();
         int color = AppAdapter.vividColor(tile.artwork());
         if (tile.item != null) {
             ImageView banner = ((View) card.getParent()).findViewById(R.id.banner);
             if (banner.getDrawable() != null) color = AppAdapter.vividColor(banner.getDrawable());
         }
-        setGlow(color);
+        transitions.focus(card, section.kind == FEATURED, tile.label, color);
         int request = ++artGeneration;
         if (section.kind != FEATURED) {
-            background.setImageDrawable(null);
-            background.setAlpha(0f);
             return; // Libraries and apps never request backgrounds, including after late image completions.
         }
         showArtwork(tile.item, request);
@@ -366,31 +379,8 @@ public final class JellyfinHomeActivity extends Activity {
         }
     }
 
-    private void setGlow(int color) {
-        GradientDrawable glow = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{(color & 0xFFFFFF) | 0x70000000, Color.TRANSPARENT});
-        glow.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-        glow.setGradientCenter((focusedColumn % 4 + .5f) / 4, .72f);
-        glow.setGradientRadius(getResources().getDisplayMetrics().widthPixels * .65f);
-        ambient.setBackground(glow);
-        ambient.setAlpha(.7f);
-    }
-
     private void fitGlass() {
-        if (focusedCard == null || !focusedCard.isFocused() || focusedCard.getWidth() == 0) return;
-        tileRect.set(0, 0, focusedCard.getWidth(), focusedCard.getHeight());
-        root.offsetDescendantRectToMyCoords(focusedCard, tileRect);
-        float scale = appSource.focusScale();
-        int width = Math.round(focusedCard.getWidth() * scale + dp(12));
-        int height = Math.round(focusedCard.getHeight() * scale + dp(12));
-        ViewGroup.LayoutParams lp = glass.getLayoutParams();
-        if (lp.width != width || lp.height != height) {
-            lp.width = width; lp.height = height; glass.setLayoutParams(lp);
-            glass.setRadius(AppAdapter.cornerRadius(focusedCard.getWidth(), density) * scale);
-        }
-        glass.setTranslationX(tileRect.exactCenterX() - width / 2f);
-        glass.setTranslationY(tileRect.exactCenterY() - height / 2f);
-        glass.setAlpha(1f);
+        transitions.follow(focusedCard);
     }
 
     private boolean usable(Bitmap bitmap) {
@@ -405,20 +395,20 @@ public final class JellyfinHomeActivity extends Activity {
         String source = JellyfinArtwork.backdrop(item.poster);
         Bitmap cached = images.peek(source, artworkWidth);
         if (usable(cached) && cached.getWidth() > cached.getHeight() * 1.3f) {
-            background.setImageBitmap(cached); background.setAlpha(.27f);
+            transitions.artwork(cached);
             android.util.Log.d("JellyfinHome", "Backdrop cache hit");
         }
         images.load(source, artworkWidth, () -> active && request == artGeneration, bitmap -> {
             if (!active || request != artGeneration) return;
             if (usable(bitmap) && bitmap.getWidth() > bitmap.getHeight() * 1.3f) {
-                background.setImageBitmap(bitmap); background.setAlpha(.27f);
+                transitions.artwork(bitmap);
                 android.util.Log.d("JellyfinHome", "Backdrop ready: " + bitmap.getWidth() + "x" + bitmap.getHeight());
             } else {
                 images.load(JellyfinArtwork.thumbnail(item.poster), artworkWidth, () -> active && request == artGeneration, fallback -> {
                     if (!active || request != artGeneration) return;
                     if (usable(fallback) && fallback.getWidth() > fallback.getHeight() * 1.3f) {
-                        background.setImageBitmap(fallback); background.setAlpha(.27f);
-                    } else { background.setImageDrawable(null); background.setAlpha(0f); }
+                        transitions.artwork(fallback);
+                    } else transitions.clearArtwork();
                 });
             }
         });
@@ -447,7 +437,7 @@ public final class JellyfinHomeActivity extends Activity {
             tiles.setClipToPadding(false);
             tiles.setItemAnimator(null);
             tiles.addOnScrollListener(new RecyclerView.OnScrollListener() {
-                @Override public void onScrolled(RecyclerView view, int dx, int dy) { fitGlass(); }
+                @Override public void onScrolled(RecyclerView view, int dx, int dy) { fulfillFocus(); fitGlass(); }
             });
             section.addView(tiles, new LinearLayout.LayoutParams(-1, dp(128)));
             return new SectionHolder(section, label, tiles);
@@ -485,7 +475,8 @@ public final class JellyfinHomeActivity extends Activity {
             nameLp.topMargin = height + dp(7);
             nameLp.height = dp(20);
             view.findViewById(R.id.name).setLayoutParams(nameLp);
-            return new AppAdapter.Holder(view, this, config.animations, false, config.reducedMotion);
+            return new AppAdapter.Holder(view, this, config.animations,
+                    config.animations && config.advancedEffects, config.reducedMotion);
         }
 
         @Override public void onBindViewHolder(AppAdapter.Holder holder, int position) {
@@ -547,7 +538,7 @@ public final class JellyfinHomeActivity extends Activity {
                 if (!active || !tile.key.equals(holder.card.getTag())) return;
                 if (!usable(bitmap)) { loadTileImage(holder, tile, candidates, index + 1); return; }
                 holder.banner.setImageBitmap(bitmap);
-                if (holder.card.isFocused()) setGlow(AppAdapter.vividColor(new BitmapDrawable(getResources(), bitmap)));
+                if (holder.card.isFocused()) transitions.glow(AppAdapter.vividColor(new BitmapDrawable(getResources(), bitmap)));
             });
         }
 

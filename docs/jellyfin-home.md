@@ -6,6 +6,12 @@ its libraries second, and the original configured app grid below. Hold **Setting
 original launcher and its app-layout settings.
 The original MIT licence and upstream history are retained.
 
+The original spring highlight, title fade/slide, and glow transitions are preserved. Rows scroll
+smoothly; reduced-motion and disabled-animation choices still apply. Featured artwork uses a short
+fade-out/fade-in instead of snapping. The small glow texture is dithered to reduce dark-gradient
+banding, and the extra full-screen gradient overlay is removed. This cannot correct banding already
+present in an image or introduced by the TV's panel processing.
+
 ## Content and artwork
 
 - Reads Jellyfin's Android TV preview channels and Watch Next entries, not your account files.

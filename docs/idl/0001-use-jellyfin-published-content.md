@@ -39,6 +39,18 @@ prefetches before rejecting useful work. Deferred visible requests retry when wo
 queue pressure is not treated as missing artwork. Reload configuration and saved app order when
 rebuilding Home, including after returning from the original launcher's settings.
 
+Restore the original spring-driven white highlight, title fade/slide, glow dip/swap, and smooth row
+navigation rather than snapping these layers. Reuse the original motion timings and reduced-motion
+settings. Featured backdrops fade out/in; rapid focus changes invalidate pending transitions.
+Keep libraries/apps strictly glow-only, even when a featured-image fade or download was pending.
+
+The ambient glow uses the original 480×270 texture geometry with deterministic spatial dithering
+in its premultiplied colour. This trades a tiny, fixed texture update per colour change for fewer
+visible dark colour contours, without repainting a full-screen radial gradient each frame. Remove
+the redundant full-screen dark gradient; the featured artwork's existing dim level keeps text legible.
+Allow a 424 KiB release APK instead of the inherited 420 KiB ceiling for the restored transition
+controller and dithered raster; no new runtime dependency is introduced.
+
 ## Alternatives and consequences
 
 A direct Jellyfin API integration could provide independently ordered libraries and complete
