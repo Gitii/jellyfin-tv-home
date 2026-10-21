@@ -16,6 +16,9 @@ import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 
 /** Small, bounded, memory-only image cache. Image networking stays inside Jellyfin's provider. */
 final class JellyfinImages implements AutoCloseable {
@@ -26,6 +29,7 @@ final class JellyfinImages implements AutoCloseable {
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(32), new ThreadPoolExecutor.DiscardOldestPolicy());
     private final Set<InputStream> streams = Collections.synchronizedSet(new HashSet<>());
+    private final ScheduledExecutorService timeouts = Executors.newSingleThreadScheduledExecutor();
     private volatile boolean closed;
     private final LruCache<String, Bitmap> cache = new LruCache<String, Bitmap>(12 * 1024 * 1024) {
         @Override protected int sizeOf(String key, Bitmap value) { return value.getByteCount(); }
@@ -60,6 +64,10 @@ final class JellyfinImages implements AutoCloseable {
         try (InputStream in = context.getContentResolver().openInputStream(Uri.parse(source))) {
             if (in == null) return null;
             streams.add(in);
+            ScheduledFuture<?> deadline = timeouts.schedule(() -> {
+                // A provider can return a pipe before its remote request succeeds. Bound that read too.
+                try { in.close(); } catch (Exception ignored) { }
+            }, 8, TimeUnit.SECONDS);
             try {
                 if (closed) return null;
                 ByteArrayOutputStream bytes = new ByteArrayOutputStream();
@@ -82,6 +90,7 @@ final class JellyfinImages implements AutoCloseable {
                 options.inPreferredConfig = Bitmap.Config.RGB_565;
                 return BitmapFactory.decodeByteArray(data, 0, data.length, options);
             } finally {
+                deadline.cancel(false);
                 streams.remove(in);
             }
         }
@@ -90,6 +99,7 @@ final class JellyfinImages implements AutoCloseable {
     @Override public void close() {
         closed = true;
         worker.shutdownNow();
+        timeouts.shutdownNow();
         main.removeCallbacksAndMessages(null);
         synchronized (streams) {
             for (InputStream stream : streams) {

@@ -4,12 +4,22 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Derives optional backdrops through Jellyfin's own image provider, without copying credentials. */
 final class JellyfinArtwork {
     static final String AUTHORITY = "org.jellyfin.androidtv.integration.provider.ImageProvider";
 
     private JellyfinArtwork() { }
+
+    /** Published fallbacks, in preference order; invalid/duplicate URIs never suppress a valid poster. */
+    static List<String> published(String thumbnail, String poster) {
+        List<String> out = new ArrayList<>();
+        if (isProviderImage(thumbnail)) out.add(thumbnail);
+        if (isProviderImage(poster) && !out.contains(poster)) out.add(poster);
+        return out;
+    }
 
     static boolean isProviderImage(String value) {
         if (value == null || value.length() > 8192) return false;

@@ -11,7 +11,9 @@ The original MIT licence and upstream history are retained.
   in Jellyfin. Continue watching and next-up entries share a shelf, as published by Jellyfin.
 - Requests full-screen backdrops through Jellyfin's own image provider. This uses the same item's
   `Images/Backdrop/0` endpoint when the published image identifies an item. Missing or inaccessible
-  backdrops fall back to the published image; portrait posters become a soft backdrop.
+  backdrops leave the published image visible; portrait posters become a soft backdrop. Published
+  thumbnails are tried before posters, and a failed thumbnail does not suppress the poster. Remote
+  image-pipe reads are bounded to eight seconds, with two workers and a 12 MiB memory cache.
 - No Jellyfin server address, login, or API key is configured in this launcher. It has no Internet
   permission; Jellyfin handles image fetching using its existing session. Nothing is sent to an
   analytics service. Image URLs and media titles are not written to logs or disk caches.

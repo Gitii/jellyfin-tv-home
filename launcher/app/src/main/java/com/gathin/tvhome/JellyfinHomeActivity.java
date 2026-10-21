@@ -43,7 +43,7 @@ public final class JellyfinHomeActivity extends Activity {
     private LinearLayout body;
     private List<JellyfinChannels.Row> rows = new ArrayList<>();
     private boolean active;
-    private int generation, artGeneration, selectedRow;
+    private int generation, artGeneration, focusGeneration, selectedRow;
     private boolean loading;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -124,6 +124,7 @@ public final class JellyfinHomeActivity extends Activity {
         active = false;
         generation++;
         artGeneration++;
+        focusGeneration++;
         loading = false;
         main.removeCallbacksAndMessages(null);
         if (images != null) images.close();
@@ -193,17 +194,33 @@ public final class JellyfinHomeActivity extends Activity {
         shelf.scrollToPosition(0);
         showItem(rows.get(index).items.get(0));
         for (int i = 0; i < tabs.getChildCount(); i++) tabs.getChildAt(i).setSelected(i == index);
-        if (focus) shelf.post(() -> {
-            RecyclerView.ViewHolder first = shelf.findViewHolderForAdapterPosition(0);
-            if (active && first != null) first.itemView.requestFocus();
-        });
+        if (focus) {
+            int request = ++focusGeneration;
+            // post() may run before RecyclerView binds its first child, especially after permission UI.
+            shelf.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                @Override public void onGlobalLayout() {
+                    if (!active || request != focusGeneration) {
+                        shelf.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                        return;
+                    }
+                    RecyclerView.ViewHolder first = shelf.findViewHolderForAdapterPosition(0);
+                    if (first != null) {
+                        shelf.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                        first.itemView.requestFocus();
+                    }
+                }
+            });
+            shelf.requestLayout();
+        }
     }
 
     private void showItem(JellyfinChannels.Item item) {
         title.setText(item.title);
         description.setText(item.description);
         int request = ++artGeneration;
-        String art = !TextUtils.isEmpty(item.thumbnail) ? item.thumbnail : item.poster;
+        boolean[] backdropShown = {false};
+        // Show published art immediately; an optional backdrop must not hold up the visible background.
+        loadPublishedArtwork(JellyfinArtwork.published(item.thumbnail, item.poster), 0, request, backdropShown);
         String backdrop = JellyfinArtwork.backdrop(item.poster);
         images.load(backdrop, 1280, bitmap -> {
             if (!active || request != artGeneration) return;
@@ -211,18 +228,30 @@ public final class JellyfinHomeActivity extends Activity {
                     : bitmap.getWidth() + "x" + bitmap.getHeight()));
             // Jellyfin returns a square placeholder when a backdrop is missing. Don't enlarge that.
             if (bitmap != null && bitmap.getWidth() > bitmap.getHeight() * 1.3f) {
+                backdropShown[0] = true;
                 background.setImageBitmap(bitmap);
-            } else {
-                images.load(art, 1280, fallback -> {
-                    if (!active || request != artGeneration) return;
-                    android.util.Log.d("JellyfinHome", "Published artwork decoded: " + (fallback == null
-                            ? "none" : fallback.getWidth() + "x" + fallback.getHeight()));
-                    if (fallback != null && fallback.getWidth() < fallback.getHeight()) {
-                        fallback = HeroArt.from(new BitmapDrawable(getResources(), fallback));
-                    }
-                    background.setImageBitmap(fallback);
-                });
             }
+        });
+    }
+
+    private void loadPublishedArtwork(List<String> candidates, int index, int request, boolean[] backdropShown) {
+        if (!active || request != artGeneration || backdropShown[0]) return;
+        if (index >= candidates.size()) {
+            background.setImageDrawable(null);
+            return;
+        }
+        images.load(candidates.get(index), 1280, bitmap -> {
+            if (!active || request != artGeneration || backdropShown[0]) return;
+            if (bitmap == null) {
+                loadPublishedArtwork(candidates, index + 1, request, backdropShown);
+                return;
+            }
+            android.util.Log.d("JellyfinHome", "Published artwork decoded: "
+                    + bitmap.getWidth() + "x" + bitmap.getHeight());
+            if (bitmap.getWidth() < bitmap.getHeight()) {
+                bitmap = HeroArt.from(new BitmapDrawable(getResources(), bitmap));
+            }
+            background.setImageBitmap(bitmap);
         });
     }
 

@@ -52,4 +52,15 @@ public class JellyfinArtworkTest {
         assertNull(JellyfinArtwork.backdrop("content://" + JellyfinArtwork.AUTHORITY + "?src=%xx"));
         assertFalse(JellyfinArtwork.isProviderImage("content://" + JellyfinArtwork.AUTHORITY + "?src=" + "a".repeat(8192)));
     }
+
+    @Test public void validPosterRemainsNextFallbackAfterThumbnail() throws Exception {
+        String poster = wrap("https://media.example/Items/" + ID + "/Images/Primary");
+        String thumbnail = wrap("https://media.example/Items/" + ID + "/Images/Thumb");
+        assertEquals(java.util.Arrays.asList(thumbnail, poster), JellyfinArtwork.published(thumbnail, poster));
+        assertEquals(java.util.Collections.singletonList(poster),
+                JellyfinArtwork.published("content://unsupported/image", poster));
+        assertEquals(java.util.Collections.singletonList(poster), JellyfinArtwork.published(poster, poster));
+        assertEquals(java.util.Collections.singletonList(poster), JellyfinArtwork.published("", poster));
+        assertTrue(JellyfinArtwork.published(null, null).isEmpty());
+    }
 }
