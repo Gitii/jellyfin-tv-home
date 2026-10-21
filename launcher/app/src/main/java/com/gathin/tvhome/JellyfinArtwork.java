@@ -1,0 +1,66 @@
+package com.gathin.tvhome;
+
+import java.net.URI;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
+/** Derives optional backdrops through Jellyfin's own image provider, without copying credentials. */
+final class JellyfinArtwork {
+    static final String AUTHORITY = "org.jellyfin.androidtv.integration.provider.ImageProvider";
+
+    private JellyfinArtwork() { }
+
+    static boolean isProviderImage(String value) {
+        if (value == null || value.length() > 8192) return false;
+        try {
+            URI uri = URI.create(value);
+            return "content".equals(uri.getScheme()) && AUTHORITY.equals(uri.getAuthority());
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /** A speculative backdrop request: missing backdrops fall back to the published artwork. */
+    static String backdrop(String value) {
+        if (!isProviderImage(value)) return null;
+        try {
+            URI wrapper = URI.create(value);
+            if (wrapper.getRawQuery() == null) return null;
+            String source = null;
+            for (String pair : wrapper.getRawQuery().split("&")) {
+                int eq = pair.indexOf('=');
+                if (eq > 0 && "src".equals(pair.substring(0, eq))) {
+                    source = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8.name());
+                }
+            }
+            if (source == null) return null;
+            URI image = URI.create(source);
+            if (!("http".equals(image.getScheme()) || "https".equals(image.getScheme()))
+                    || image.getHost() == null || image.getUserInfo() != null) return null;
+            String path = image.getPath();
+            // Only transform the documented Jellyfin item-image endpoint, retaining any base path.
+            if (path == null || !path.matches(".*/Items/[a-fA-F0-9-]{32,36}/Images/(Primary|Thumb)(/0)?")) return null;
+            path = path.replaceFirst("/(Primary|Thumb)(/0)?$", "/Backdrop/0");
+            StringBuilder query = new StringBuilder();
+            if (image.getRawQuery() != null) {
+                for (String pair : image.getRawQuery().split("&")) {
+                    String key = URLDecoder.decode(pair.split("=", 2)[0], StandardCharsets.UTF_8.name());
+                    if (key.equalsIgnoreCase("tag") || key.equalsIgnoreCase("maxWidth")
+                            || key.equalsIgnoreCase("maxHeight") || key.equalsIgnoreCase("width")
+                            || key.equalsIgnoreCase("height") || key.equalsIgnoreCase("quality")) continue;
+                    if (query.length() > 0) query.append('&');
+                    query.append(pair);
+                }
+            }
+            if (query.length() > 0) query.append('&');
+            query.append("maxWidth=1280&quality=80");
+            String url = new URI(image.getScheme(), image.getAuthority(), path, null, null).toASCIIString()
+                    + "?" + query;
+            return "content://" + AUTHORITY + "?src="
+                    + URLEncoder.encode(url, StandardCharsets.UTF_8.name());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+}

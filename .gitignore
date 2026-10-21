@@ -14,3 +14,10 @@ backup/
 *.aab
 launcher/hs_err_pid*.log
 launcher/replay_pid*.log
+
+# Local signing material and device configuration never belong in the public fork.
+*.jks
+*.keystore
+.env
+.env.*
+*.local.json
