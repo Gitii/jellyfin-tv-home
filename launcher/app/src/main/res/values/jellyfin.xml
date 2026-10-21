@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="jellyfin_continue">Continue watching / Next up</string>
+    <string name="jellyfin_refresh">Refresh</string>
+    <string name="jellyfin_apps">APPS</string>
+    <string name="jellyfin_featured">Jellyfin · Featured</string>
+    <string name="jellyfin_libraries">Your libraries</string>
+    <string name="jellyfin_original_home">Original launcher</string>
+    <string name="jellyfin_tagline">Your library. Your home.</string>
+    <string name="jellyfin_loading">Loading Jellyfin channels…</string>
+    <string name="jellyfin_allow_listings">Allow TV listings</string>
+    <string name="jellyfin_permission_needed">Allow read-only access to TV listings to show Jellyfin’s content here. Your Jellyfin login stays inside Jellyfin. App shortcuts work without this permission.</string>
+    <string name="jellyfin_empty">No Jellyfin channels are visible yet. Enable Android TV home-screen integration in Jellyfin, open it with your usual profile, then return Home and choose Refresh.</string>
+    <string name="jellyfin_unavailable">Android TV did not expose Jellyfin’s channels. Check Jellyfin’s home-screen integration and your TV’s listing permissions. You can still open Jellyfin below.</string>
+    <string name="jellyfin_open_failed">Could not open the app. Is it installed and enabled?</string>
+</resources>

@@ -11,8 +11,19 @@ android {
         applicationId providers.gradleProperty('launcherApplicationId').getOrElse('com.gathin.tvhome')
         minSdk 26
         targetSdk 34
-        versionCode 6
-        versionName '2.5'
+        versionCode 9
+        versionName '2.5-jellyfin.3'
+    }
+
+    signingConfigs {
+        if (System.getenv('TVHOME_SIGNING_STORE')) {
+            localRelease {
+                storeFile file(System.getenv('TVHOME_SIGNING_STORE'))
+                storePassword System.getenv('TVHOME_SIGNING_PASSWORD')
+                keyAlias System.getenv('TVHOME_SIGNING_ALIAS')
+                keyPassword System.getenv('TVHOME_SIGNING_PASSWORD')
+            }
+        }
     }
 
     buildTypes {
@@ -22,7 +33,7 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             // Sideloaded over ADB, never published: sign with the debug key so it installs over a debug build.
-            signingConfig signingConfigs.debug
+            signingConfig System.getenv('TVHOME_SIGNING_STORE') ? signingConfigs.localRelease : signingConfigs.debug
         }
     }
 

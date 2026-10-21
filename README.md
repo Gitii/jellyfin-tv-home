@@ -1,3 +1,15 @@
+# Jellyfin TV Home
+
+A public fork of [Gathin23/cleanyourtv](https://github.com/Gathin23/cleanyourtv), extending its Android
+TV launcher with a Jellyfin-first content shelf and full-screen library artwork. Other apps stay
+accessible underneath. See [Jellyfin Home: build, setup, and recovery](docs/jellyfin-home.md).
+
+The exact CleanMyTV 2.4 source is preserved at tag `installed-cleanmytv-2.4`. Upstream history and
+MIT attribution are retained below. Device backups, signing keys, and Jellyfin credentials are not
+part of this repository.
+
+---
+
 <p align="center">
   <a href="https://cleanyour.tv"><img src="https://raw.githubusercontent.com/Gathin23/cleanyourtv/main/docs/banner.png" alt="CleanYourTV. Your TV, minus the ads. Strip the bloatware from any Android TV or Google TV over Wi-Fi and replace the ad-filled home screen with a clean launcher that looks like an Apple TV. No root, no cable, nothing uninstalled, and a one-line restore." width="800"></a>
 </p>
