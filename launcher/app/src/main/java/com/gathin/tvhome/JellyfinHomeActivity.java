@@ -242,7 +242,7 @@ public final class JellyfinHomeActivity extends Activity {
         }
         images.load(candidates.get(index), 1280, bitmap -> {
             if (!active || request != artGeneration || backdropShown[0]) return;
-            if (bitmap == null) {
+            if (bitmap == null || isPlaceholder(bitmap)) {
                 loadPublishedArtwork(candidates, index + 1, request, backdropShown);
                 return;
             }
@@ -253,6 +253,15 @@ public final class JellyfinHomeActivity extends Activity {
             }
             background.setImageBitmap(bitmap);
         });
+    }
+
+    private boolean isPlaceholder(Bitmap bitmap) {
+        int w = bitmap.getWidth(), h = bitmap.getHeight();
+        if (w != h) return false;
+        return JellyfinArtwork.isPlaceholder(w, h, new int[]{
+                bitmap.getPixel(0, 0), bitmap.getPixel(w / 2, 0), bitmap.getPixel(w - 1, 0),
+                bitmap.getPixel(0, h / 2), bitmap.getPixel(w - 1, h / 2),
+                bitmap.getPixel(0, h - 1), bitmap.getPixel(w / 2, h - 1), bitmap.getPixel(w - 1, h - 1)});
     }
 
     private void openItem(JellyfinChannels.Item item) {

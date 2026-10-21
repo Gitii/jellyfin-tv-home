@@ -84,10 +84,11 @@ final class JellyfinImages implements AutoCloseable {
                 if (options.outWidth <= 0 || options.outHeight <= 0
                         || options.outWidth > 16000 || options.outHeight > 16000) return null;
                 options.inSampleSize = 1;
-                while (options.outWidth / options.inSampleSize > width * 2
-                        || options.outHeight / options.inSampleSize > width * 2) options.inSampleSize *= 2;
+                while (options.outWidth / options.inSampleSize > width
+                        || options.outHeight / options.inSampleSize > width) options.inSampleSize *= 2;
                 options.inJustDecodeBounds = false;
-                options.inPreferredConfig = Bitmap.Config.RGB_565;
+                // Keep alpha so Jellyfin's transparent error tile can fall through to another image.
+                options.inPreferredConfig = Bitmap.Config.ARGB_8888;
                 return BitmapFactory.decodeByteArray(data, 0, data.length, options);
             } finally {
                 deadline.cancel(false);

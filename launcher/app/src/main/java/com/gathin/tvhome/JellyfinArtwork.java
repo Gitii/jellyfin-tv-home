@@ -21,6 +21,15 @@ final class JellyfinArtwork {
         return out;
     }
 
+    /** Jellyfin's error tile is a square logo with a transparent surround, not usable backdrop art. */
+    static boolean isPlaceholder(int width, int height, int[] borderPixels) {
+        if (width <= 0 || width != height || borderPixels.length != 8) return false;
+        for (int pixel : borderPixels) {
+            if ((pixel >>> 24) > 16) return false;
+        }
+        return true;
+    }
+
     static boolean isProviderImage(String value) {
         if (value == null || value.length() > 8192) return false;
         try {

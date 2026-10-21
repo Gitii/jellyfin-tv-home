@@ -63,4 +63,15 @@ public class JellyfinArtworkTest {
         assertEquals(java.util.Collections.singletonList(poster), JellyfinArtwork.published("", poster));
         assertTrue(JellyfinArtwork.published(null, null).isEmpty());
     }
+
+    @Test public void transparentSquareErrorTileFallsThroughButOpaqueArtworkDoesNot() {
+        int[] transparentBorder = new int[8];
+        assertTrue(JellyfinArtwork.isPlaceholder(640, 640, transparentBorder));
+        assertFalse(JellyfinArtwork.isPlaceholder(1280, 720, transparentBorder));
+        int[] opaqueBorder = new int[8];
+        java.util.Arrays.fill(opaqueBorder, 0xFF101010);
+        assertFalse(JellyfinArtwork.isPlaceholder(640, 640, opaqueBorder));
+        transparentBorder[0] = 0xFF101010;
+        assertFalse(JellyfinArtwork.isPlaceholder(640, 640, transparentBorder));
+    }
 }
