@@ -1,6 +1,7 @@
 package com.gathin.tvhome;
 
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.media.tv.TvContract;
 import android.net.Uri;
@@ -16,14 +17,17 @@ final class JellyfinChannels {
     static final int MAX_ITEMS = 20;
 
     static final class Item {
-        final String title, description, poster, thumbnail, intent;
+        final String key, title, description, poster, thumbnail, intent;
+        final boolean library;
 
-        Item(String title, String description, String poster, String thumbnail, String intent) {
+        Item(String key, String title, String description, String poster, String thumbnail, String intent, boolean library) {
+            this.key = key;
             this.title = title;
             this.description = description;
             this.poster = poster;
             this.thumbnail = thumbnail;
             this.intent = intent;
+            this.library = library;
         }
     }
 
@@ -36,11 +40,19 @@ final class JellyfinChannels {
 
     static final class Result {
         final List<Row> rows;
+        final List<Item> featured, libraries;
         final boolean unavailable;
 
         Result(List<Row> rows, boolean unavailable) {
             this.rows = rows;
             this.unavailable = unavailable;
+            Map<String, Item> features = new LinkedHashMap<>(), views = new LinkedHashMap<>();
+            for (Row row : rows) for (Item item : row.items) {
+                Map<String, Item> target = item.library ? views : features;
+                if (target.size() < MAX_ITEMS) target.putIfAbsent(item.key, item);
+            }
+            featured = new ArrayList<>(features.values());
+            libraries = new ArrayList<>(views.values());
         }
     }
 
@@ -93,8 +105,15 @@ final class JellyfinChannels {
             int scanned = 0;
             while (c != null && c.moveToNext() && scanned++ < 300 && row.items.size() < MAX_ITEMS) {
                 if (!PACKAGE.equals(c.getString(0)) || c.isNull(1) || c.isNull(5)) continue;
-                row.items.add(new Item(c.getString(1), c.getString(2), c.getString(3),
-                        c.getString(4), c.getString(5)));
+                try {
+                    Intent intent = Intent.parseUri(c.getString(5), Intent.URI_INTENT_SCHEME);
+                    String key = intent.getStringExtra("ItemId");
+                    row.items.add(new Item(key == null ? c.getString(5) : key,
+                            c.getString(1), c.getString(2), c.getString(3), c.getString(4), c.getString(5),
+                            intent.getBooleanExtra("ItemIsUserView", false)));
+                } catch (Exception ignored) {
+                    // A damaged published intent must not prevent the other libraries from appearing.
+                }
             }
         }
     }

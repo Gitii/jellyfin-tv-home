@@ -1,26 +1,38 @@
 # Jellyfin-first Home
 
-This fork adds `com.gathin.tvhome/.JellyfinHomeActivity`. It puts Jellyfin's content shelf and
-full-screen artwork first, with other apps below. The original launcher remains under **All apps**.
+This fork adds `com.gathin.tvhome/.JellyfinHomeActivity`. It reuses the original clock/header,
+rounded app tiles, white focus glass and focus animation. Featured Jellyfin content comes first,
+its libraries second, and the original configured app grid below. Hold **Settings** to reach the
+original launcher and its app-layout settings.
 The original MIT licence and upstream history are retained.
 
 ## Content and artwork
 
 - Reads Jellyfin's Android TV preview channels and Watch Next entries, not your account files.
-- Select a content category above the shelf; use the remote to focus a title and press OK to open it
-  in Jellyfin. Continue watching and next-up entries share a shelf, as published by Jellyfin.
+- Use Left/Right to browse featured content or libraries, Down to move between rows, and OK to open
+  the selected title or library directly in Jellyfin. Featured content starts with Watch Next entries
+  and fills from other published channels, deduplicated by item ID. Libraries are identified by
+  Jellyfin's published `ItemIsUserView` metadata, not translated channel names.
 - Requests full-screen backdrops through Jellyfin's own image provider. This uses the same item's
   `Images/Backdrop/0` endpoint when the published image identifies an item. Missing or inaccessible
-  backdrops leave the published image visible; portrait posters become a soft backdrop. Published
-  thumbnails are tried before posters, and a failed thumbnail does not suppress the poster. Remote
-  image-pipe reads are bounded to eight seconds, with two workers and a 12 MiB memory cache.
+  backdrops fall back to landscape thumbnail artwork, then the original glow. Libraries and apps
+  always use the glow; pending featured-image callbacks cannot paint over those rows. Library tiles
+  use Jellyfin's actual published image. Library backdrops and the screensaver are not changed.
+- Backdrop requests use 1920px-wide sources at quality 90. The Sony Android 9 interface currently
+  exposes a 1920×1080 app surface despite its 4K panel: decoding matches that actual surface, avoiding
+  both the old 1280px request cap and unnecessary 4K image conversions/bitmap allocations. Source images with less
+  detail cannot be made sharper by requesting a larger size.
+- Immediate previous/next featured backdrops are prefetched; identical requests are coalesced and
+  focused artwork takes priority over queued work. Two workers use a 26 MiB backdrop cache plus a
+  6 MiB thumbnail cache. Cache entries survive opening another app, but are released under memory
+  pressure or activity destruction. Image-pipe reads are bounded to eight seconds.
 - No Jellyfin server address, login, or API key is configured in this launcher. It has no Internet
   permission; Jellyfin handles image fetching using its existing session. Nothing is sent to an
   analytics service. Image URLs and media titles are not written to logs or disk caches.
 - Only Jellyfin's rows are read. The launcher does not write to the TV listings provider.
 
 Choose **Allow TV listings** and approve the read-only permission prompt. Use your normal Jellyfin
-profile, then return Home and select **Refresh**. Enable home-screen integration in Jellyfin if your
+profile, then return Home. Hold **Settings** and select **Refresh** to reload explicitly. Enable home-screen integration in Jellyfin if your
 version provides that setting; version 0.19.10 publishes automatically. Jellyfin controls which items
 are published and when they update. Android TV
 may limit what third-party launchers can read; an empty shelf is not proof that the server is empty.

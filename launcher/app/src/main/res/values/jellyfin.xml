@@ -3,6 +3,9 @@
     <string name="jellyfin_continue">Continue watching / Next up</string>
     <string name="jellyfin_refresh">Refresh</string>
     <string name="jellyfin_apps">APPS</string>
+    <string name="jellyfin_featured">Jellyfin · Featured</string>
+    <string name="jellyfin_libraries">Your libraries</string>
+    <string name="jellyfin_original_home">Original launcher</string>
     <string name="jellyfin_tagline">Your library. Your home.</string>
     <string name="jellyfin_loading">Loading Jellyfin channels…</string>
     <string name="jellyfin_allow_listings">Allow TV listings</string>

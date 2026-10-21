@@ -27,7 +27,7 @@ public class JellyfinArtworkTest {
                 "https://media.example/jellyfin/Items/" + ID + "/Images/Primary?tag=old&maxWidth=360")));
         assertEquals("media.example", image.getHost());
         assertEquals("/jellyfin/Items/" + ID + "/Images/Backdrop/0", image.getPath());
-        assertEquals("maxWidth=1280&quality=80", image.getQuery());
+        assertEquals("maxWidth=1920&quality=90", image.getQuery());
     }
 
     @Test public void preservesAuthenticationWithoutCopyingItIntoAnotherOrigin() throws Exception {
@@ -35,7 +35,7 @@ public class JellyfinArtworkTest {
                 "http://media.example:8096/Items/" + ID
                         + "/Images/Thumb/0?api_key=test-only&quality=40&height=400&MaxHeight=300")));
         assertEquals("media.example:8096", image.getAuthority());
-        assertEquals("api_key=test-only&maxWidth=1280&quality=80", image.getQuery());
+        assertEquals("api_key=test-only&maxWidth=1920&quality=90", image.getQuery());
     }
 
     @Test public void rejectsOtherProvidersAndNonImages() throws Exception {
@@ -73,5 +73,25 @@ public class JellyfinArtworkTest {
         assertFalse(JellyfinArtwork.isPlaceholder(640, 640, opaqueBorder));
         transparentBorder[0] = 0xFF101010;
         assertFalse(JellyfinArtwork.isPlaceholder(640, 640, transparentBorder));
+    }
+
+    @Test public void preloadsOnlyImmediateNeighborsWithoutWrapping() {
+        assertEquals(java.util.Arrays.asList(2, 0), JellyfinArtwork.neighbors(1, 4));
+        assertEquals(java.util.Collections.singletonList(1), JellyfinArtwork.neighbors(0, 4));
+        assertEquals(java.util.Collections.singletonList(2), JellyfinArtwork.neighbors(3, 4));
+        assertTrue(JellyfinArtwork.neighbors(0, 1).isEmpty());
+    }
+
+    @Test public void samplesForActualSurfaceWithoutHalvingFullHdOriginal() {
+        assertEquals(1, JellyfinArtwork.sampleSize(1920, 1080, 1920));
+        assertEquals(2, JellyfinArtwork.sampleSize(3840, 2160, 1920));
+        assertEquals(1, JellyfinArtwork.sampleSize(3000, 1688, 1920));
+        assertEquals(1, JellyfinArtwork.sampleSize(1280, 720, 1920));
+    }
+
+    @Test public void landscapeTilesUseThumbNotPortraitPrimary() throws Exception {
+        URI image = unwrap(JellyfinArtwork.thumbnail(wrap("https://media.example/Items/" + ID + "/Images/Primary")));
+        assertEquals("/Items/" + ID + "/Images/Thumb", image.getPath());
+        assertEquals("maxWidth=800&quality=90", image.getQuery());
     }
 }

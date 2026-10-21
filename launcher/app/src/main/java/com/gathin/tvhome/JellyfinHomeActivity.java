@@ -3,22 +3,31 @@ package com.gathin.tvhome;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.media.tv.TvContract;
+import android.media.tv.TvInputInfo;
+import android.media.tv.TvInputManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.HorizontalScrollView;
+import android.view.ViewTreeObserver;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -26,97 +35,178 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Jellyfin content in front, other apps underneath. The original home remains available as All apps. */
+/** Original launcher chrome and tiles: featured Jellyfin content, libraries, then the configured apps. */
 public final class JellyfinHomeActivity extends Activity {
+    private static final int FEATURED = 0, LIBRARIES = 1, APPS = 2;
+    private static final int ROW_DP = 150;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService listings = Executors.newSingleThreadExecutor();
+    private final List<Section> sections = new ArrayList<>();
+    private Config config;
+    private AppAdapter appSource;
     private JellyfinImages images;
+    private FrameLayout root;
+    private RecyclerView rows;
+    private LinearLayoutManager rowLayout;
     private ImageView background;
-    private TextView title, description, status, permissionButton;
-    private LinearLayout tabs, apps;
-    private RecyclerView shelf;
-    private LinearLayout body;
-    private List<JellyfinChannels.Row> rows = new ArrayList<>();
-    private boolean active;
-    private int generation, artGeneration, focusGeneration, selectedRow;
-    private boolean loading;
+    private View hero, ambient;
+    private TextView title, status;
+    private GlassView glass;
+    private PopupWindow popup;
+    private float density;
+    private int artworkWidth;
+    private boolean active, loading, resetFocus = true;
+    private int generation, artGeneration, focusedRow, focusedColumn;
+    private int pendingRow = -1, pendingColumn;
+    private String focusedKey;
+    private View focusedCard;
+    private final Rect tileRect = new Rect();
+    private final ViewTreeObserver.OnGlobalLayoutListener layoutListener = () -> {
+        fulfillFocus();
+        fitGlass();
+    };
+
+    private static final class Tile {
+        final JellyfinChannels.Item item;
+        final AppAdapter.Entry app;
+        final String key, label;
+        Tile(JellyfinChannels.Item item) { this.item = item; app = null; key = item.key; label = item.title; }
+        Tile(AppAdapter.Entry app) { this.app = app; item = null; key = app.component.flattenToString(); label = app.label; }
+        Drawable artwork() { return app == null ? null : app.banner != null ? app.banner : app.icon; }
+    }
+
+    private static final class Section {
+        final int kind;
+        final String label;
+        final List<Tile> tiles = new ArrayList<>();
+        Section(int kind, String label) { this.kind = kind; this.label = label; }
+    }
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        buildHome();
+        config = Config.load(this);
+        density = getResources().getDisplayMetrics().density;
+        // A 4K source is sampled for the actual app surface, not blindly kept as a 32 MiB texture.
+        artworkWidth = Math.max(1280, Math.min(1920, getResources().getDisplayMetrics().widthPixels));
+        images = new JellyfinImages(this);
+        appSource = new AppAdapter(this, null, 4, config);
+        appSource.setSavedOrder(Order.ranks(Order.load(Order.file(this)), config.dockApps));
+        setContentView(R.layout.activity_main);
+        root = findViewById(R.id.root);
+        root.setBackgroundColor(Color.BLACK);
+        background = findViewById(R.id.heroArt);
+        background.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        background.setVisibility(View.VISIBLE);
+        ambient = findViewById(R.id.ambient);
+        glass = findViewById(R.id.glass);
+        hero = findViewById(R.id.hero);
+        title = findViewById(R.id.heroName);
+        FrameLayout.LayoutParams heroLp = (FrameLayout.LayoutParams) hero.getLayoutParams();
+        heroLp.topMargin = dp(133);
+        hero.setLayoutParams(heroLp);
+        title.setMaxWidth(dp(800));
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        findViewById(R.id.heroMeta).setVisibility(View.GONE);
+        findViewById(R.id.heroDots).setVisibility(View.GONE);
+        View scrim = findViewById(R.id.heroScrim);
+        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0x33000000, 0x00000000, 0x77000000}));
+        scrim.setVisibility(View.VISIBLE);
+
+        RecyclerView originalGrid = findViewById(R.id.grid);
+        FrameLayout wrapper = (FrameLayout) originalGrid.getParent();
+        wrapper.removeView(originalGrid);
+        rows = new RecyclerView(this);
+        rows.setClipToPadding(false);
+        rows.setClipChildren(false);
+        rows.setItemAnimator(null);
+        rowLayout = new LinearLayoutManager(this) {
+            @Override public boolean requestChildRectangleOnScreen(RecyclerView parent, View child,
+                    Rect rect, boolean immediate, boolean focusedChildVisible) {
+                return false; // The explicit D-pad navigation parks the preceding row above the focused one.
+            }
+        };
+        rows.setLayoutManager(rowLayout);
+        rows.setAdapter(new Sections());
+        wrapper.addView(rows, new FrameLayout.LayoutParams(-1, -1));
+        rows.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override public void onScrolled(RecyclerView view, int dx, int dy) { fitGlass(); }
+        });
+        root.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener);
+        wrapper.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            int[] location = new int[2], origin = new int[2];
+            rows.getLocationInWindow(location);
+            root.getLocationInWindow(origin);
+            int padding = Math.max(dp(12), dp(198) - location[1] + origin[1]);
+            if (rows.getPaddingTop() != padding) rows.setPadding(0, padding, 0, dp(20));
+        });
+        status = new TextView(this);
+        status.setTextColor(0xFFCCCCCC);
+        status.setTextSize(14);
+        status.setMaxLines(2);
+        status.setTypeface(getResources().getFont(R.font.outfit));
+        status.setFocusable(true);
+        status.setPadding(dp(12), dp(6), dp(12), dp(6));
+        status.setBackgroundResource(R.drawable.pill_bg);
+        status.setOnClickListener(v -> {
+            if (!hasListingsPermission()) requestPermissions(new String[]{"android.permission.READ_TV_LISTINGS"}, 71);
+            else openJellyfin();
+        });
+        FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(dp(800), -2);
+        statusLp.leftMargin = dp(56);
+        statusLp.topMargin = dp(140);
+        root.addView(status, statusLp);
+        setUpHeader();
+        getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldView, newView) -> {
+            if (newView == null || newView.getId() != R.id.card) {
+                focusedCard = null;
+                glass.setAlpha(0f);
+            }
+        });
     }
 
-    private void buildHome() {
-        android.widget.FrameLayout root = new android.widget.FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
-        background = new ImageView(this);
-        background.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        background.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        root.addView(background, new android.widget.FrameLayout.LayoutParams(-1, -1));
-        View scrim = new View(this);
-        scrim.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x66000000, 0x99000000, 0xFA080B13}));
-        root.addView(scrim, new android.widget.FrameLayout.LayoutParams(-1, -1));
-        body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(36), dp(18), dp(36), dp(12));
-        root.addView(body, new android.widget.FrameLayout.LayoutParams(-1, -1));
+    private void setUpHeader() {
+        View inputs = findViewById(R.id.btnInputs), network = findViewById(R.id.btnWifi);
+        View settings = findViewById(R.id.btnSettings);
+        inputs.setOnClickListener(v -> showInputs());
+        network.setOnClickListener(v -> open(new Intent(Settings.ACTION_WIRELESS_SETTINGS)));
+        network.setOnLongClickListener(v -> { open(new Intent(Settings.ACTION_WIFI_SETTINGS)); return true; });
+        settings.setOnClickListener(v -> open(new Intent(Settings.ACTION_SETTINGS)));
+        settings.setOnLongClickListener(v -> { showMenu(); return true; });
+        findViewById(R.id.btnReorder).setVisibility(View.GONE);
+        for (View button : new View[]{inputs, network, settings}) button.setOnKeyListener((v, key, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (key == KeyEvent.KEYCODE_DPAD_UP) return true;
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) { focus(0, focusedColumn); return true; }
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT && v == inputs) return true;
+            return key == KeyEvent.KEYCODE_DPAD_RIGHT && v == settings;
+        });
+    }
 
-        LinearLayout bar = horizontal();
-        TextView brand = text("JELLYFIN", 15, 0xFFA28BFA);
-        brand.setLetterSpacing(.18f);
-        bar.addView(brand, new LinearLayout.LayoutParams(0, dp(36), 1));
-        permissionButton = button(getString(R.string.jellyfin_allow_listings), () ->
-                requestPermissions(new String[]{"android.permission.READ_TV_LISTINGS"}, 71));
-        bar.addView(permissionButton);
-        bar.addView(button(getString(R.string.jellyfin_refresh), this::refresh));
-        bar.addView(button(getString(R.string.settings), () -> startActivity(new Intent(Settings.ACTION_SETTINGS))));
-        body.addView(bar);
-
-        LinearLayout hero = new LinearLayout(this);
-        hero.setOrientation(LinearLayout.VERTICAL);
-        hero.setGravity(Gravity.CENTER_VERTICAL);
-        title = text("Jellyfin", 34, Color.WHITE);
-        title.setMaxLines(2);
-        description = text(getString(R.string.jellyfin_tagline), 14, 0xFFD3D6E0);
-        description.setMaxLines(3);
-        description.setEllipsize(TextUtils.TruncateAt.END);
-        hero.addView(title, new LinearLayout.LayoutParams(-1, -2));
-        hero.addView(description, new LinearLayout.LayoutParams(-1, -2));
-        body.addView(hero, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        tabs = horizontal();
-        HorizontalScrollView tabScroll = horizontalScroll(tabs);
-        body.addView(tabScroll, new LinearLayout.LayoutParams(-1, dp(38)));
-        status = text(getString(R.string.jellyfin_loading), 14, 0xFFD3D6E0);
-        status.setGravity(Gravity.CENTER_VERTICAL);
-        status.setMaxLines(4);
-        body.addView(status, new LinearLayout.LayoutParams(-1, dp(132)));
-        shelf = new RecyclerView(this);
-        shelf.setLayoutManager(new LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false));
-        shelf.setClipToPadding(false);
-        shelf.setPadding(dp(5), dp(5), dp(5), dp(5));
-        shelf.setItemAnimator(null);
-        shelf.setVisibility(View.GONE);
-        body.addView(shelf, new LinearLayout.LayoutParams(-1, dp(132)));
-        TextView appLabel = text(getString(R.string.jellyfin_apps), 11, 0xFF939AAC);
-        appLabel.setPadding(0, dp(6), 0, 0);
-        body.addView(appLabel, new LinearLayout.LayoutParams(-1, dp(24)));
-        apps = horizontal();
-        body.addView(horizontalScroll(apps), new LinearLayout.LayoutParams(-1, dp(46)));
-        setContentView(root);
-        loadApps();
+    private void updateHeader() {
+        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        int greeting = hour < 12 ? R.string.good_morning : hour < 18 ? R.string.good_afternoon : R.string.good_evening;
+        ((TextView) findViewById(R.id.greeting)).setText(greeting);
+        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        NetworkCapabilities caps = cm == null ? null : cm.getNetworkCapabilities(cm.getActiveNetwork());
+        TextView network = findViewById(R.id.btnWifi);
+        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+            network.setText(R.string.ethernet);
+            network.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_ethernet, 0, 0, 0);
+        } else network.setText(R.string.wifi);
     }
 
     @Override protected void onStart() {
         super.onStart();
         active = true;
-        images = new JellyfinImages(this);
+        updateHeader();
         refresh();
     }
 
@@ -124,288 +214,404 @@ public final class JellyfinHomeActivity extends Activity {
         active = false;
         generation++;
         artGeneration++;
-        focusGeneration++;
         loading = false;
-        main.removeCallbacksAndMessages(null);
-        if (images != null) images.close();
-        background.setImageDrawable(null);
-        shelf.setAdapter(null);
+        pendingRow = -1;
+        focusedCard = null;
+        if (popup != null) popup.dismiss();
+        glass.setAlpha(0f);
         super.onStop();
+        // Keep the bounded image cache while another app is in front; returning Home need not fetch again.
     }
 
     @Override protected void onDestroy() {
+        root.getViewTreeObserver().removeOnGlobalLayoutListener(layoutListener);
         listings.shutdownNow();
+        images.close();
+        main.removeCallbacksAndMessages(null);
         super.onDestroy();
+    }
+
+    @Override public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (images != null && (level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL
+                || level >= TRIM_MEMORY_BACKGROUND)) images.trim();
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        if (active) refresh();
+        resetFocus = true;
+        if (active) {
+            focus(0, 0);
+            refresh();
+        }
+    }
+
+    private boolean hasListingsPermission() {
+        return checkSelfPermission("android.permission.READ_TV_LISTINGS") == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results);
+        if (code == 71) refresh();
     }
 
     private void refresh() {
         if (!active || loading) return;
-        boolean permitted = checkSelfPermission("android.permission.READ_TV_LISTINGS")
-                == PackageManager.PERMISSION_GRANTED;
-        permissionButton.setVisibility(permitted ? View.GONE : View.VISIBLE);
-        if (!permitted) {
-            status.setVisibility(View.VISIBLE);
-            status.setText(R.string.jellyfin_permission_needed);
-            shelf.setVisibility(View.GONE);
-            permissionButton.requestFocus();
-            return;
-        }
         loading = true;
         int request = ++generation;
+        boolean permitted = hasListingsPermission();
         listings.execute(() -> {
-            JellyfinChannels.Result result = JellyfinChannels.load(getApplicationContext());
+            JellyfinChannels.Result content = permitted ? JellyfinChannels.load(getApplicationContext())
+                    : new JellyfinChannels.Result(Collections.emptyList(), false);
             main.post(() -> {
                 if (!active || request != generation) return;
                 loading = false;
-                rows = result.rows;
-                tabs.removeAllViews();
-                for (int i = 0; i < rows.size(); i++) {
-                    final int index = i;
-                    tabs.addView(button(rows.get(i).title, () -> selectRow(index, true)));
-                }
-                boolean empty = rows.isEmpty();
-                status.setVisibility(empty ? View.VISIBLE : View.GONE);
-                shelf.setVisibility(empty ? View.GONE : View.VISIBLE);
-                if (empty) {
-                    status.setText(result.unavailable ? R.string.jellyfin_unavailable : R.string.jellyfin_empty);
-                    if (apps.getChildCount() > 0) apps.getChildAt(0).requestFocus();
-                } else {
-                    selectRow(Math.min(selectedRow, rows.size() - 1), true);
-                }
-                android.util.Log.i("JellyfinHome", "Published Jellyfin rows: " + rows.size()
-                        + "; restricted/unavailable: " + result.unavailable);
+                rebuild(content);
+                status.setVisibility(content.featured.isEmpty() && content.libraries.isEmpty() ? View.VISIBLE : View.GONE);
+                status.setText(!permitted ? R.string.jellyfin_permission_needed
+                        : content.unavailable ? R.string.jellyfin_unavailable : R.string.jellyfin_empty);
+                if (!permitted) status.requestFocus();
+                android.util.Log.i("JellyfinHome", "Featured: " + content.featured.size()
+                        + "; libraries: " + content.libraries.size() + "; provider unavailable: " + content.unavailable);
             });
         });
     }
 
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == 71) refresh();
-    }
-
-    private void selectRow(int index, boolean focus) {
-        selectedRow = index;
-        shelf.setAdapter(new Programs(rows.get(index).items));
-        shelf.scrollToPosition(0);
-        showItem(rows.get(index).items.get(0));
-        for (int i = 0; i < tabs.getChildCount(); i++) tabs.getChildAt(i).setSelected(i == index);
-        if (focus) {
-            int request = ++focusGeneration;
-            // post() may run before RecyclerView binds its first child, especially after permission UI.
-            shelf.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
-                @Override public void onGlobalLayout() {
-                    if (!active || request != focusGeneration) {
-                        shelf.getViewTreeObserver().removeOnGlobalLayoutListener(this);
-                        return;
-                    }
-                    RecyclerView.ViewHolder first = shelf.findViewHolderForAdapterPosition(0);
-                    if (first != null) {
-                        shelf.getViewTreeObserver().removeOnGlobalLayoutListener(this);
-                        first.itemView.requestFocus();
-                    }
-                }
-            });
-            shelf.requestLayout();
+    private void rebuild(JellyfinChannels.Result content) {
+        sections.clear();
+        if (!content.featured.isEmpty()) {
+            Section section = new Section(FEATURED, getString(R.string.jellyfin_featured));
+            for (JellyfinChannels.Item item : content.featured) section.tiles.add(new Tile(item));
+            sections.add(section);
         }
-    }
-
-    private void showItem(JellyfinChannels.Item item) {
-        title.setText(item.title);
-        description.setText(item.description);
-        int request = ++artGeneration;
-        boolean[] backdropShown = {false};
-        // Show published art immediately; an optional backdrop must not hold up the visible background.
-        loadPublishedArtwork(JellyfinArtwork.published(item.thumbnail, item.poster), 0, request, backdropShown);
-        String backdrop = JellyfinArtwork.backdrop(item.poster);
-        images.load(backdrop, 1280, bitmap -> {
-            if (!active || request != artGeneration) return;
-            android.util.Log.d("JellyfinHome", "Backdrop decoded: " + (bitmap == null ? "none"
-                    : bitmap.getWidth() + "x" + bitmap.getHeight()));
-            // Jellyfin returns a square placeholder when a backdrop is missing. Don't enlarge that.
-            if (bitmap != null && bitmap.getWidth() > bitmap.getHeight() * 1.3f) {
-                backdropShown[0] = true;
-                background.setImageBitmap(bitmap);
+        if (!content.libraries.isEmpty()) {
+            Section section = new Section(LIBRARIES, getString(R.string.jellyfin_libraries));
+            for (JellyfinChannels.Item item : content.libraries) section.tiles.add(new Tile(item));
+            sections.add(section);
+        }
+        appSource.reload(Collections.emptyList());
+        Section appRow = null;
+        for (AppAdapter.Entry app : appSource.entries()) {
+            if (app.kind == AppAdapter.Entry.EMPTY) continue;
+            if (appRow == null || appRow.tiles.size() == 4) {
+                appRow = new Section(APPS, appRow == null ? getString(R.string.jellyfin_apps) : "");
+                sections.add(appRow);
             }
-        });
+            appRow.tiles.add(new Tile(app));
+        }
+        focusedCard = null;
+        glass.setAlpha(0f);
+        rows.getAdapter().notifyDataSetChanged();
+        int row = 0, column = 0;
+        if (!resetFocus && focusedKey != null) {
+            for (int r = 0; r < sections.size(); r++) for (int c = 0; c < sections.get(r).tiles.size(); c++) {
+                if (focusedKey.equals(sections.get(r).tiles.get(c).key)) { row = r; column = c; }
+            }
+        }
+        resetFocus = false;
+        if (hasListingsPermission()) focus(row, column);
     }
 
-    private void loadPublishedArtwork(List<String> candidates, int index, int request, boolean[] backdropShown) {
-        if (!active || request != artGeneration || backdropShown[0]) return;
-        if (index >= candidates.size()) {
-            background.setImageDrawable(null);
+    private void focus(int row, int column) {
+        if (sections.isEmpty()) return;
+        pendingRow = Math.max(0, Math.min(row, sections.size() - 1));
+        pendingColumn = Math.max(0, Math.min(column, sections.get(pendingRow).tiles.size() - 1));
+        rowLayout.scrollToPositionWithOffset(Math.max(0, pendingRow - 1), 0);
+        rows.requestLayout();
+    }
+
+    private void fulfillFocus() {
+        if (!active || pendingRow < 0) return;
+        SectionHolder section = (SectionHolder) rows.findViewHolderForAdapterPosition(pendingRow);
+        if (section == null) return;
+        RecyclerView.ViewHolder holder = section.tiles.findViewHolderForAdapterPosition(pendingColumn);
+        if (holder == null || holder.itemView.getLeft() < 0 || holder.itemView.getRight() > section.tiles.getWidth()) {
+            ((LinearLayoutManager) section.tiles.getLayoutManager()).scrollToPositionWithOffset(Math.max(0, pendingColumn - 3), 0);
             return;
         }
-        images.load(candidates.get(index), 1280, bitmap -> {
-            if (!active || request != artGeneration || backdropShown[0]) return;
-            if (bitmap == null || isPlaceholder(bitmap)) {
-                loadPublishedArtwork(candidates, index + 1, request, backdropShown);
-                return;
+        View card = holder.itemView.findViewById(R.id.card);
+        pendingRow = -1;
+        card.requestFocus();
+    }
+
+    private void focused(int row, int column, View card) {
+        if (!active || row >= sections.size()) return;
+        focusedRow = row;
+        focusedColumn = column;
+        focusedCard = card;
+        Section section = sections.get(row);
+        Tile tile = section.tiles.get(column);
+        focusedKey = tile.key;
+        hero.setAlpha(section.kind == FEATURED ? 1f : 0f);
+        title.setText(tile.label);
+        fitGlass();
+        int color = AppAdapter.vividColor(tile.artwork());
+        if (tile.item != null) {
+            ImageView banner = ((View) card.getParent()).findViewById(R.id.banner);
+            if (banner.getDrawable() != null) color = AppAdapter.vividColor(banner.getDrawable());
+        }
+        setGlow(color);
+        int request = ++artGeneration;
+        if (section.kind != FEATURED) {
+            background.setImageDrawable(null);
+            background.setAlpha(0f);
+            return; // Libraries and apps never request backgrounds, including after late image completions.
+        }
+        showArtwork(tile.item, request);
+        for (int neighbor : JellyfinArtwork.neighbors(column, section.tiles.size())) {
+            images.prefetch(JellyfinArtwork.backdrop(section.tiles.get(neighbor).item.poster), artworkWidth);
+        }
+    }
+
+    private void setGlow(int color) {
+        GradientDrawable glow = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{(color & 0xFFFFFF) | 0x70000000, Color.TRANSPARENT});
+        glow.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        glow.setGradientCenter((focusedColumn % 4 + .5f) / 4, .72f);
+        glow.setGradientRadius(getResources().getDisplayMetrics().widthPixels * .65f);
+        ambient.setBackground(glow);
+        ambient.setAlpha(.7f);
+    }
+
+    private void fitGlass() {
+        if (focusedCard == null || !focusedCard.isFocused() || focusedCard.getWidth() == 0) return;
+        tileRect.set(0, 0, focusedCard.getWidth(), focusedCard.getHeight());
+        root.offsetDescendantRectToMyCoords(focusedCard, tileRect);
+        float scale = appSource.focusScale();
+        int width = Math.round(focusedCard.getWidth() * scale + dp(12));
+        int height = Math.round(focusedCard.getHeight() * scale + dp(12));
+        ViewGroup.LayoutParams lp = glass.getLayoutParams();
+        if (lp.width != width || lp.height != height) {
+            lp.width = width; lp.height = height; glass.setLayoutParams(lp);
+            glass.setRadius(AppAdapter.cornerRadius(focusedCard.getWidth(), density) * scale);
+        }
+        glass.setTranslationX(tileRect.exactCenterX() - width / 2f);
+        glass.setTranslationY(tileRect.exactCenterY() - height / 2f);
+        glass.setAlpha(1f);
+    }
+
+    private boolean usable(Bitmap bitmap) {
+        if (bitmap == null) return false;
+        int w = bitmap.getWidth(), h = bitmap.getHeight();
+        return !JellyfinArtwork.isPlaceholder(w, h, new int[]{bitmap.getPixel(0, 0), bitmap.getPixel(w / 2, 0),
+                bitmap.getPixel(w - 1, 0), bitmap.getPixel(0, h / 2), bitmap.getPixel(w - 1, h / 2),
+                bitmap.getPixel(0, h - 1), bitmap.getPixel(w / 2, h - 1), bitmap.getPixel(w - 1, h - 1)});
+    }
+
+    private void showArtwork(JellyfinChannels.Item item, int request) {
+        String source = JellyfinArtwork.backdrop(item.poster);
+        Bitmap cached = images.peek(source, artworkWidth);
+        if (usable(cached) && cached.getWidth() > cached.getHeight() * 1.3f) {
+            background.setImageBitmap(cached); background.setAlpha(.27f);
+            android.util.Log.d("JellyfinHome", "Backdrop cache hit");
+        }
+        images.load(source, artworkWidth, bitmap -> {
+            if (!active || request != artGeneration) return;
+            if (usable(bitmap) && bitmap.getWidth() > bitmap.getHeight() * 1.3f) {
+                background.setImageBitmap(bitmap); background.setAlpha(.27f);
+                android.util.Log.d("JellyfinHome", "Backdrop ready: " + bitmap.getWidth() + "x" + bitmap.getHeight());
+            } else {
+                images.load(JellyfinArtwork.thumbnail(item.poster), artworkWidth, fallback -> {
+                    if (!active || request != artGeneration) return;
+                    if (usable(fallback) && fallback.getWidth() > fallback.getHeight() * 1.3f) {
+                        background.setImageBitmap(fallback); background.setAlpha(.27f);
+                    } else { background.setImageDrawable(null); background.setAlpha(0f); }
+                });
             }
-            android.util.Log.d("JellyfinHome", "Published artwork decoded: "
-                    + bitmap.getWidth() + "x" + bitmap.getHeight());
-            if (bitmap.getWidth() < bitmap.getHeight()) {
-                bitmap = HeroArt.from(new BitmapDrawable(getResources(), bitmap));
-            }
-            background.setImageBitmap(bitmap);
         });
     }
 
-    private boolean isPlaceholder(Bitmap bitmap) {
-        int w = bitmap.getWidth(), h = bitmap.getHeight();
-        if (w != h) return false;
-        return JellyfinArtwork.isPlaceholder(w, h, new int[]{
-                bitmap.getPixel(0, 0), bitmap.getPixel(w / 2, 0), bitmap.getPixel(w - 1, 0),
-                bitmap.getPixel(0, h / 2), bitmap.getPixel(w - 1, h / 2),
-                bitmap.getPixel(0, h - 1), bitmap.getPixel(w / 2, h - 1), bitmap.getPixel(w - 1, h - 1)});
+    private final class Sections extends RecyclerView.Adapter<SectionHolder> {
+        @Override public SectionHolder onCreateViewHolder(ViewGroup parent, int type) {
+            LinearLayout section = new LinearLayout(JellyfinHomeActivity.this);
+            section.setOrientation(LinearLayout.VERTICAL);
+            section.setClipChildren(false);
+            section.setLayoutParams(new RecyclerView.LayoutParams(-1, dp(ROW_DP)));
+            TextView label = new TextView(JellyfinHomeActivity.this);
+            label.setTextSize(10);
+            label.setTextColor(0x77FFFFFF);
+            label.setTypeface(getResources().getFont(R.font.outfit_medium));
+            label.setLetterSpacing(.17f);
+            label.setGravity(Gravity.CENTER_VERTICAL);
+            label.setPadding(dp(16), 0, 0, 0);
+            section.addView(label, new LinearLayout.LayoutParams(-1, dp(22)));
+            RecyclerView tiles = new RecyclerView(JellyfinHomeActivity.this);
+            tiles.setLayoutManager(new LinearLayoutManager(JellyfinHomeActivity.this, RecyclerView.HORIZONTAL, false) {
+                @Override public boolean requestChildRectangleOnScreen(RecyclerView parent, View child,
+                        Rect rect, boolean immediate, boolean focusedChildVisible) { return false; }
+            });
+            tiles.setClipChildren(false);
+            tiles.setClipToPadding(false);
+            tiles.setItemAnimator(null);
+            tiles.addOnScrollListener(new RecyclerView.OnScrollListener() {
+                @Override public void onScrolled(RecyclerView view, int dx, int dy) { fitGlass(); }
+            });
+            section.addView(tiles, new LinearLayout.LayoutParams(-1, dp(128)));
+            return new SectionHolder(section, label, tiles);
+        }
+
+        @Override public void onBindViewHolder(SectionHolder holder, int position) {
+            holder.label.setText(sections.get(position).label.toUpperCase(Locale.getDefault()));
+            holder.tiles.setAdapter(new Tiles(position));
+        }
+        @Override public int getItemCount() { return sections.size(); }
+    }
+
+    private static final class SectionHolder extends RecyclerView.ViewHolder {
+        final TextView label;
+        final RecyclerView tiles;
+        SectionHolder(View view, TextView label, RecyclerView tiles) { super(view); this.label = label; this.tiles = tiles; }
+    }
+
+    private final class Tiles extends RecyclerView.Adapter<AppAdapter.Holder> implements AppAdapter.TileListener {
+        private final int row;
+        Tiles(int row) { this.row = row; }
+        @Override public AppAdapter.Holder onCreateViewHolder(ViewGroup parent, int type) {
+            View view = getLayoutInflater().inflate(R.layout.item_app, parent, false);
+            view.setPadding(0, 0, 0, 0);
+            int innerWidth = parent.getWidth() > 0 ? parent.getWidth()
+                    : getResources().getDisplayMetrics().widthPixels - dp(112);
+            view.setLayoutParams(new RecyclerView.LayoutParams(innerWidth / 4, dp(128)));
+            int width = AppAdapter.tileWidthPx(innerWidth, 4, density);
+            int height = AppAdapter.tileHeightPx(width);
+            View card = view.findViewById(R.id.card);
+            card.getLayoutParams().width = width;
+            card.getLayoutParams().height = height;
+            FrameLayout.LayoutParams nameLp = (FrameLayout.LayoutParams) view.findViewById(R.id.name).getLayoutParams();
+            nameLp.width = width;
+            nameLp.topMargin = height + dp(7);
+            nameLp.height = dp(20);
+            view.findViewById(R.id.name).setLayoutParams(nameLp);
+            return new AppAdapter.Holder(view, this, config.animations, false, config.reducedMotion);
+        }
+
+        @Override public void onBindViewHolder(AppAdapter.Holder holder, int position) {
+            Tile tile = sections.get(row).tiles.get(position);
+            holder.name.setText(tile.label);
+            holder.name.setVisibility(sections.get(row).kind == FEATURED ? View.INVISIBLE : View.VISIBLE);
+            holder.name.setAlpha(0f);
+            holder.card.setContentDescription(tile.label);
+            holder.card.setTag(tile.key);
+            holder.card.setOnClickListener(v -> { if (tile.app != null) appSource.launch(tile.app); else openItem(tile.item); });
+            holder.card.setScaleX(1f); holder.card.setScaleY(1f);
+            holder.banner.setImageDrawable(null);
+            holder.banner.setVisibility(View.VISIBLE);
+            holder.icon.setVisibility(View.GONE);
+            holder.label.setVisibility(View.GONE);
+            if (tile.app != null) {
+                if (tile.app.banner != null) holder.banner.setImageDrawable(tile.app.banner);
+                else {
+                    holder.banner.setVisibility(View.GONE);
+                    holder.icon.setImageDrawable(tile.app.icon); holder.icon.setVisibility(View.VISIBLE);
+                    holder.label.setText(tile.label); holder.label.setVisibility(View.VISIBLE);
+                }
+            } else loadTile(holder, tile, sections.get(row).kind == FEATURED);
+        }
+
+        private void loadTile(AppAdapter.Holder holder, Tile tile, boolean featured) {
+            List<String> candidates = new ArrayList<>();
+            if (featured) candidates.add(JellyfinArtwork.thumbnail(tile.item.poster));
+            candidates.addAll(JellyfinArtwork.published(tile.item.thumbnail, tile.item.poster));
+            loadTileImage(holder, tile, candidates, 0);
+        }
+
+        private void loadTileImage(AppAdapter.Holder holder, Tile tile, List<String> candidates, int index) {
+            if (index >= candidates.size()) { holder.label.setText(tile.label); holder.label.setVisibility(View.VISIBLE); return; }
+            images.load(candidates.get(index), dp(200), bitmap -> {
+                if (!active || !tile.key.equals(holder.card.getTag())) return;
+                if (!usable(bitmap)) { loadTileImage(holder, tile, candidates, index + 1); return; }
+                holder.banner.setImageBitmap(bitmap);
+                if (holder.card.isFocused()) setGlow(AppAdapter.vividColor(new BitmapDrawable(getResources(), bitmap)));
+            });
+        }
+
+        @Override public int getItemCount() { return row < sections.size() ? sections.get(row).tiles.size() : 0; }
+        @Override public void onTileFocused(int position, View card) { focused(row, position, card); }
+        @Override public boolean onTileVerticalKey(int position, int key) {
+            SectionHolder holder = (SectionHolder) rows.findViewHolderForAdapterPosition(row);
+            int first = holder == null ? 0 : Math.max(0,
+                    ((LinearLayoutManager) holder.tiles.getLayoutManager()).findFirstVisibleItemPosition());
+            int column = Math.min(3, Math.max(0, position - first));
+            if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                if (row == 0) findViewById(R.id.btnInputs).requestFocus(); else focus(row - 1, column);
+            } else if (key == KeyEvent.KEYCODE_DPAD_DOWN) focus(Math.min(sections.size() - 1, row + 1), column);
+            else if (key == KeyEvent.KEYCODE_DPAD_LEFT) focus(row, Math.max(0, position - 1));
+            else if (key == KeyEvent.KEYCODE_DPAD_RIGHT) focus(row, Math.min(getItemCount() - 1, position + 1));
+            else return false;
+            return true;
+        }
+        @Override public void onLibraryRequested() { }
+        @Override public void onLibraryFocused() { }
+        @Override public void onLibraryUp() { }
     }
 
     private void openItem(JellyfinChannels.Item item) {
         try {
             Intent intent = Intent.parseUri(item.intent, Intent.URI_INTENT_SCHEME);
-            if (intent.getComponent() != null
-                    && !JellyfinChannels.PACKAGE.equals(intent.getComponent().getPackageName())) {
-                openJellyfin();
-                return;
+            if (intent.getComponent() != null && !JellyfinChannels.PACKAGE.equals(intent.getComponent().getPackageName())) {
+                openJellyfin(); return;
             }
-            intent.setSelector(null);
-            intent.setPackage(JellyfinChannels.PACKAGE);
-            intent.setClipData(null);
+            intent.setSelector(null); intent.setPackage(JellyfinChannels.PACKAGE); intent.setClipData(null);
             intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            startActivity(intent);
-        } catch (Exception ignored) {
-            openJellyfin();
+            open(intent);
+        } catch (Exception ignored) { openJellyfin(); }
+    }
+
+    private void openJellyfin() {
+        Intent intent = getPackageManager().getLeanbackLaunchIntentForPackage(JellyfinChannels.PACKAGE);
+        if (intent != null) open(intent);
+    }
+
+    private void open(Intent intent) {
+        try { startActivity(intent); }
+        catch (RuntimeException ignored) { Toast.makeText(this, R.string.jellyfin_open_failed, Toast.LENGTH_SHORT).show(); }
+    }
+
+    private LinearLayout menu(View anchor) {
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout items = panel.findViewById(R.id.rows);
+        popup = new PopupWindow(panel, dp(280), -2, true);
+        popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        popup.setOutsideTouchable(true);
+        popup.showAsDropDown(anchor, 0, dp(10), Gravity.END);
+        return items;
+    }
+
+    private void menuItem(LinearLayout items, String text, Runnable action) {
+        View item = getLayoutInflater().inflate(R.layout.item_input, items, false);
+        ((TextView) item.findViewById(R.id.title)).setText(text);
+        item.findViewById(R.id.icon).setVisibility(View.GONE);
+        item.findViewById(R.id.dot).setVisibility(View.GONE);
+        item.findViewById(R.id.status).setVisibility(View.GONE);
+        item.setOnClickListener(v -> { popup.dismiss(); action.run(); });
+        items.addView(item);
+        if (items.getChildCount() == 1) item.requestFocus();
+    }
+
+    private void showMenu() {
+        LinearLayout items = menu(findViewById(R.id.btnSettings));
+        menuItem(items, getString(R.string.jellyfin_refresh), this::refresh);
+        if (!hasListingsPermission()) menuItem(items, getString(R.string.jellyfin_allow_listings), () ->
+                requestPermissions(new String[]{"android.permission.READ_TV_LISTINGS"}, 71));
+        menuItem(items, getString(R.string.jellyfin_original_home), () -> open(new Intent(this, MainActivity.class)));
+    }
+
+    private void showInputs() {
+        TvInputManager manager = getSystemService(TvInputManager.class);
+        if (manager == null) { Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show(); return; }
+        List<TvInputInfo> inputs = new ArrayList<>(manager.getTvInputList());
+        inputs.removeIf(input -> !input.isPassthroughInput() || input.isHidden(this));
+        inputs.sort((a, b) -> String.valueOf(a.loadLabel(this)).compareToIgnoreCase(String.valueOf(b.loadLabel(this))));
+        if (inputs.isEmpty()) { Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show(); return; }
+        LinearLayout items = menu(findViewById(R.id.btnInputs));
+        for (TvInputInfo input : inputs) {
+            if (inputs.stream().anyMatch(other -> input.getId().equals(other.getParentId()))) continue;
+            CharSequence label = input.loadCustomLabel(this);
+            String text = String.valueOf(label == null || label.length() == 0 ? input.loadLabel(this) : label);
+            menuItem(items, text, () -> open(new Intent(Intent.ACTION_VIEW,
+                    TvContract.buildChannelUriForPassthroughInput(input.getId()))));
         }
     }
 
-    private void openJellyfin() { openApp(JellyfinChannels.PACKAGE); }
-
-    private void openApp(String pkg) {
-        Intent intent = getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
-        if (intent == null) intent = getPackageManager().getLaunchIntentForPackage(pkg);
-        try {
-            if (intent == null) throw new IllegalStateException();
-            startActivity(intent);
-        } catch (RuntimeException ignored) {
-            Toast.makeText(this, R.string.jellyfin_open_failed, Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private void loadApps() {
-        apps.removeAllViews();
-        apps.addView(button("Jellyfin", this::openJellyfin));
-        apps.addView(button(getString(R.string.app_library), () -> startActivity(new Intent(this, MainActivity.class))));
-        List<ResolveInfo> installed = getPackageManager().queryIntentActivities(
-                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0);
-        installed.sort(Comparator.comparing(a -> String.valueOf(a.loadLabel(getPackageManager()))));
-        java.util.Set<String> seen = new java.util.HashSet<>();
-        seen.add(JellyfinChannels.PACKAGE);
-        seen.add(getPackageName());
-        for (ResolveInfo app : installed) {
-            if (app.activityInfo == null || !seen.add(app.activityInfo.packageName)) continue;
-            String pkg = app.activityInfo.packageName;
-            apps.addView(button(String.valueOf(app.loadLabel(getPackageManager())), () -> openApp(pkg)));
-            if (apps.getChildCount() >= 24) break;
-        }
-    }
-
-    private final class Programs extends RecyclerView.Adapter<ProgramHolder> {
-        private final List<JellyfinChannels.Item> items;
-        Programs(List<JellyfinChannels.Item> items) { this.items = items; }
-
-        @Override public ProgramHolder onCreateViewHolder(ViewGroup parent, int type) {
-            LinearLayout card = new LinearLayout(JellyfinHomeActivity.this);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(4), dp(4), dp(4), dp(4));
-            card.setFocusable(true);
-            card.setClickable(true);
-            card.setBackgroundResource(R.drawable.jellyfin_focus);
-            RecyclerView.LayoutParams lp = new RecyclerView.LayoutParams(dp(172), dp(120));
-            lp.setMarginEnd(dp(12));
-            card.setLayoutParams(lp);
-            ImageView image = new ImageView(JellyfinHomeActivity.this);
-            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            image.setBackgroundColor(0xFF171C2B);
-            image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            TextView label = text("", 12, Color.WHITE);
-            label.setSingleLine();
-            label.setEllipsize(TextUtils.TruncateAt.END);
-            card.addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
-            card.addView(label, new LinearLayout.LayoutParams(-1, dp(22)));
-            return new ProgramHolder(card, image, label);
-        }
-
-        @Override public void onBindViewHolder(ProgramHolder holder, int position) {
-            JellyfinChannels.Item item = items.get(position);
-            holder.label.setText(item.title);
-            holder.itemView.setContentDescription(item.title);
-            holder.image.setImageDrawable(null);
-            holder.image.setTag(item);
-            images.load(item.poster, 360, bitmap -> {
-                if (holder.image.getTag() == item) holder.image.setImageBitmap(bitmap);
-            });
-            holder.itemView.setOnClickListener(v -> openItem(item));
-            holder.itemView.setOnFocusChangeListener((v, focused) -> { if (focused) showItem(item); });
-        }
-
-        @Override public int getItemCount() { return items.size(); }
-    }
-
-    private static final class ProgramHolder extends RecyclerView.ViewHolder {
-        final ImageView image;
-        final TextView label;
-        ProgramHolder(View view, ImageView image, TextView label) {
-            super(view);
-            this.image = image;
-            this.label = label;
-        }
-    }
-
-    private TextView button(String label, Runnable action) {
-        TextView view = text(label, 13, Color.WHITE);
-        view.setPadding(dp(14), dp(6), dp(14), dp(6));
-        view.setSingleLine();
-        view.setGravity(Gravity.CENTER);
-        view.setFocusable(true);
-        view.setBackgroundResource(R.drawable.jellyfin_focus);
-        view.setOnClickListener(v -> action.run());
-        view.setOnFocusChangeListener((v, focused) -> {
-            if (focused && apps != null && v.getParent() == apps && active) {
-                artGeneration++;
-                title.setText(v == apps.getChildAt(0) ? "Jellyfin" : label);
-                description.setText(R.string.jellyfin_tagline);
-            }
-        });
-        return view;
-    }
-
-    private TextView text(String value, int size, int color) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextSize(size);
-        view.setTextColor(color);
-        view.setFontFeatureSettings("kern");
-        return view;
-    }
-
-    private LinearLayout horizontal() {
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.HORIZONTAL);
-        layout.setGravity(Gravity.CENTER_VERTICAL);
-        return layout;
-    }
-
-    private HorizontalScrollView horizontalScroll(LinearLayout content) {
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.setFillViewport(false);
-        scroll.addView(content);
-        return scroll;
-    }
-
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int dp(int value) { return Math.round(value * density); }
 }

@@ -42,6 +42,29 @@ final class JellyfinArtwork {
 
     /** A speculative backdrop request: missing backdrops fall back to the published artwork. */
     static String backdrop(String value) {
+        return itemImage(value, "Backdrop/0", 1920);
+    }
+
+    static String thumbnail(String value) {
+        return itemImage(value, "Thumb", 800);
+    }
+
+    static List<Integer> neighbors(int position, int count) {
+        List<Integer> out = new ArrayList<>();
+        if (position + 1 < count) out.add(position + 1);
+        if (position > 0) out.add(position - 1);
+        return out;
+    }
+
+    /** Do not halve a 1080p original simply because it is wider than the old 1280px request cap. */
+    static int sampleSize(int width, int height, int target) {
+        if (target <= 0) return 1;
+        int sample = 1;
+        while (Math.max(width, height) / (sample * 2) >= target) sample *= 2;
+        return sample;
+    }
+
+    private static String itemImage(String value, String type, int width) {
         if (!isProviderImage(value)) return null;
         try {
             URI wrapper = URI.create(value);
@@ -60,7 +83,7 @@ final class JellyfinArtwork {
             String path = image.getPath();
             // Only transform the documented Jellyfin item-image endpoint, retaining any base path.
             if (path == null || !path.matches(".*/Items/[a-fA-F0-9-]{32,36}/Images/(Primary|Thumb)(/0)?")) return null;
-            path = path.replaceFirst("/(Primary|Thumb)(/0)?$", "/Backdrop/0");
+            path = path.replaceFirst("/(Primary|Thumb)(/0)?$", "/" + type);
             StringBuilder query = new StringBuilder();
             if (image.getRawQuery() != null) {
                 for (String pair : image.getRawQuery().split("&")) {
@@ -73,7 +96,7 @@ final class JellyfinArtwork {
                 }
             }
             if (query.length() > 0) query.append('&');
-            query.append("maxWidth=1280&quality=80");
+            query.append("maxWidth=").append(width).append("&quality=90");
             String url = new URI(image.getScheme(), image.getAuthority(), path, null, null).toASCIIString()
                     + "?" + query;
             return "content://" + AUTHORITY + "?src="
